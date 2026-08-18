@@ -1,0 +1,6 @@
+# dsh-aseprite bundle patch.
+# One row hosts the plugin entry (the client half is served by the package's
+# dsh.client declaration at /plugins/dsh-aseprite/client.js).
+- insert:
+    - id: aseprite
+      name: 'dsh-aseprite'

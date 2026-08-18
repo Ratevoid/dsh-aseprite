@@ -1,0 +1,66 @@
+{
+  "name": "dsh-aseprite",
+  "version": "0.1.0",
+  "description": "在 DSH Web UI 里作像素画/精灵动画的内嵌编辑器：画布+图层+帧动画+调色板，用 JS 直接读写 Aseprite (.aseprite) 工程文件，不依赖安装 Aseprite。",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "aseprite",
+    "pixel-art",
+    "sprite",
+    "animation",
+    "web ui"
+  ],
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./client/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "cordis.patch.yml",
+    "src",
+    "assets"
+  ],
+  "dsh": {
+    "plugin": {
+      "schemaVersion": 1,
+      "displayName": {
+        "zh-CN": "像素画编辑器",
+        "en": "Pixel Editor"
+      },
+      "summary": {
+        "zh-CN": "在 DSH 网页 GUI 里直接绘制像素画与精灵动画（图层/帧/调色板），读写 Aseprite .aseprite 工程文件，无需安装 Aseprite。",
+        "en": "Pixel-art & sprite animation editor inside the DSH web GUI (layers/frames/palette) that reads/writes Aseprite .aseprite files; no Aseprite install needed."
+      },
+      "category": "media"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
+}
