@@ -860,6 +860,7 @@ function ensureStyles() {
   font-size: 13px;
   line-height: 1.5;
 }
+[data-ase-root] { min-width: 0; }
 [data-ase-root] * , [data-ase-root] *::before, [data-ase-root] *::after { box-sizing: border-box; }
 
 .ase-root {
@@ -869,6 +870,7 @@ function ensureStyles() {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  height: 560px;
   max-height: min(78vh, 720px);
   min-height: 360px;
   font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -925,6 +927,7 @@ function ensureStyles() {
 .ase-body {
   display: grid;
   grid-template-columns: minmax(126px, 18%) minmax(0, 1fr) minmax(150px, 20%);
+  grid-template-rows: minmax(0, 1fr);
   gap: 8px;
   padding: 8px;
   min-height: 0;
