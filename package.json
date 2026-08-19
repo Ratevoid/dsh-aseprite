@@ -1,6 +1,6 @@
 {
   "name": "dsh-aseprite",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "在 DSH Web UI 里作像素画/精灵动画的内嵌编辑器：画布+图层+帧动画+调色板，用 JS 直接读写 Aseprite (.aseprite) 工程文件，不依赖安装 Aseprite。",
   "license": "MIT",
   "type": "module",

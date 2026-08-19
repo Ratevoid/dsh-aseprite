@@ -911,29 +911,32 @@ function Toolbar({ t, onUndo, onRedo, canUndo, canRedo, onOpen, onSave, onExport
 }
 
 // ── canvas ──────────────────────────────────────────────────────────────────
+function renderCanvasDocument(canvas, doc, frame, onion) {
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  const w = doc.width, h = doc.height
+  if (canvas.width !== w) canvas.width = w
+  if (canvas.height !== h) canvas.height = h
+  ctx.clearRect(0, 0, w, h)
+  if (onion && frame > 0) {
+    const prev = compositeFrame(doc, frame - 1, new Uint8ClampedArray(w * h * 4))
+    ctx.globalAlpha = 0.35
+    ctx.putImageData(new ImageData(new Uint8ClampedArray(prev), w, h), 0, 0)
+    ctx.globalAlpha = 1
+  }
+  const cur = compositeFrame(doc, frame, new Uint8ClampedArray(w * h * 4))
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(cur), w, h), 0, 0)
+}
+
 function CanvasView({ t }) {
   const s = useAse()
   const canvasRef = React.useRef(null)
   const overlayRef = React.useRef(null)
   const drag = React.useRef(null) // { startX, startY, curX, curY, working }
 
-  // draw composite whenever doc/frame/layer/onion changes
+  // Commit state once per gesture; paint directly during movement.
   React.useEffect(() => {
-    const cv = canvasRef.current
-    if (!cv) return
-    const ctx = cv.getContext('2d')
-    const w = s.doc.width, h = s.doc.height
-    if (cv.width !== w) cv.width = w
-    if (cv.height !== h) cv.height = h
-    ctx.clearRect(0, 0, w, h)
-    if (s.onion && s.frame > 0) {
-      const prev = compositeFrame(s.doc, s.frame - 1, new Uint8ClampedArray(w * h * 4))
-      ctx.globalAlpha = 0.35
-      ctx.putImageData(new ImageData(new Uint8ClampedArray(prev), w, h), 0, 0)
-      ctx.globalAlpha = 1
-    }
-    const cur = compositeFrame(s.doc, s.frame, new Uint8ClampedArray(w * h * 4))
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(cur), w, h), 0, 0)
+    renderCanvasDocument(canvasRef.current, s.doc, s.frame, s.onion)
   }, [s.doc, s.frame, s.onion, s.layer, s.tool])
 
   const pixelAt = (e) => {
@@ -956,44 +959,78 @@ function CanvasView({ t }) {
       commit((d) => floodFill(d, s.frame, s.layer, x, y, color))
       return
     }
-    // pencil / eraser / line / rect: snapshot once, then drag
+    // Clone and snapshot once; movement stays off the React render path.
     snapshot.history.snapshot()
     const working = cloneDoc(s.doc)
     if (s.tool === 'pencil' || s.tool === 'eraser') {
       const c = s.tool === 'eraser' ? { r: 0, g: 0, b: 0, a: 0 } : color
       setPixel(working, s.frame, s.layer, x, y, c)
-      set({ doc: working })
     }
-    drag.current = { startX: x, startY: y, curX: x, curY: y, working }
-    window.addEventListener('pointermove', move)
+    drag.current = {
+      startX: x, startY: y, curX: x, curY: y,
+      working, pointerId: e.pointerId, raf: 0
+    }
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch (_) {}
+    if (s.tool === 'pencil' || s.tool === 'eraser') {
+      renderCanvasDocument(canvasRef.current, working, s.frame, s.onion)
+    }
+    window.addEventListener('pointermove', move, { passive: false })
     window.addEventListener('pointerup', end)
+    window.addEventListener('pointercancel', end)
   }
 
   const move = (e) => {
     const d = drag.current
     if (!d) return
-    const [x, y] = pixelAt(e)
-    if (x === d.curX && y === d.curY) return
-    const prevX = d.curX, prevY = d.curY
-    d.curX = x; d.curY = y
+    e.preventDefault()
+    const coalesced = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : []
+    const samples = coalesced.length > 0 ? coalesced : [e]
+    let moved = false
     const color = s.tool === 'eraser' ? { r: 0, g: 0, b: 0, a: 0 } : s.color
+    for (const sample of samples) {
+      const [x, y] = pixelAt(sample)
+      if (x === d.curX && y === d.curY) continue
+      const prevX = d.curX, prevY = d.curY
+      d.curX = x; d.curY = y
+      moved = true
+      if (s.tool === 'pencil' || s.tool === 'eraser') {
+        // Interpolate each coalesced segment so fast strokes stay continuous.
+        drawLine(d.working, s.frame, s.layer, prevX, prevY, x, y, color)
+      }
+    }
+    if (!moved) return
     if (s.tool === 'pencil' || s.tool === 'eraser') {
-      // Pointer events can be coalesced while dragging; interpolate every
-      // skipped pixel so fast strokes never leave checkerboard gaps.
-      drawLine(d.working, s.frame, s.layer, prevX, prevY, x, y, color)
-      set({ doc: d.working })
+      // At most one composite/render per animation frame, never one React
+      // render per pointer event.
+      if (!d.raf) {
+        d.raf = window.requestAnimationFrame(() => {
+          d.raf = 0
+          if (drag.current === d) renderCanvasDocument(canvasRef.current, d.working, s.frame, s.onion)
+        })
+      }
     } else if (s.tool === 'line' || s.tool === 'rect') {
       drawPreview(d)
     }
   }
 
-  const end = () => {
+  const end = (e) => {
     const d = drag.current
     drag.current = null
     window.removeEventListener('pointermove', move)
     window.removeEventListener('pointerup', end)
+    window.removeEventListener('pointercancel', end)
     if (!d) return
-    if (s.tool === 'line' || s.tool === 'rect') {
+    if (d.raf) {
+      window.cancelAnimationFrame(d.raf)
+      d.raf = 0
+    }
+    try {
+      if (canvasRef.current?.hasPointerCapture?.(d.pointerId)) canvasRef.current.releasePointerCapture(d.pointerId)
+    } catch (_) {}
+    if (s.tool === 'pencil' || s.tool === 'eraser') {
+      renderCanvasDocument(canvasRef.current, d.working, s.frame, s.onion)
+      set({ doc: d.working })
+    } else if (s.tool === 'line' || s.tool === 'rect') {
       const color = s.color
       const doc = cloneDoc(d.working)
       if (s.tool === 'line') drawLine(doc, s.frame, s.layer, d.startX, d.startY, d.curX, d.curY, color)
@@ -1033,6 +1070,8 @@ function CanvasView({ t }) {
   React.useEffect(() => () => {
     window.removeEventListener('pointermove', move)
     window.removeEventListener('pointerup', end)
+    window.removeEventListener('pointercancel', end)
+    if (drag.current?.raf) window.cancelAnimationFrame(drag.current.raf)
   }, [])
 
   const size = { width: s.doc.width * s.zoom, height: s.doc.height * s.zoom }
