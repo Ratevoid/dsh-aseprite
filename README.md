@@ -1,68 +1,73 @@
 # dsh-aseprite
 
-> 非官方 Aseprite-compatible 像素画 / 精灵动画编辑器插件；不隶属于或获得 Aseprite 官方背书。
+[简体中文](README.zh-CN.md)
 
-把 **Aseprite 做成 DSH 插件** —— 在 DeepSeek Harness 的 Web GUI 里内嵌一个像素画 / 精灵动画编辑器：
+A pixel-art and sprite-animation editor plugin for DeepSeek Harness. It is compatible with Aseprite project files and requires no Aseprite installation.
 
-- 🎨 会话头部出现 **🎨** 按钮，点击展开/收起编辑器面板（停靠在输入框上方）。
-- ✏️ 工具：铅笔 / 橡皮 / 油漆桶 / 取色器 / 直线 / 矩形；支持撤销、重做、缩放、网格、洋葱皮。
-- 🧅 图层：新建 / 删除 / 上移 / 下移 / 显示隐藏。
-- 🎞️ 帧动画：新增 / 复制 / 删除帧、每帧时长(ms)、播放预览。
-- 🎨 调色板：内置 DB16 / PICO-8 风格 16 色调色板，可自定义颜色、追加色板、点击取色。
-- 💾 读写 **真正的 .aseprite 工程文件**（纯 JS 实现的官方二进制格式编解码，无需安装 Aseprite），支持 RGBA / 灰度 / 索引色读取与压缩 cel 解压；另支持导出当前帧 PNG 与整张 Sprite Sheet PNG。
+- 🎨 Adds a **🎨** button to the conversation header; click it to open or close the editor dock above the message input.
+- ✏️ Tools: pencil, eraser, bucket fill, picker, line, and rectangle, with undo, redo, zoom, grid, and onion skinning.
+- 🧅 Layers: create, delete, reorder, and toggle visibility.
+- 🎞️ Animation frames: add, duplicate, delete, set frame duration (ms), and preview playback.
+- 🎨 Palettes: built-in DB16 and PICO-8-style 16-color palettes, custom colors, extra palettes, and color picking.
+- 💾 Reads and writes **.aseprite project files** in pure JavaScript, with no Aseprite installation required; supports RGBA, grayscale, indexed-color reading, compressed cel decoding, current-frame PNG export, and sprite-sheet PNG export.
 
-## 演示
+## Demo
 
-![DSH Pixel Editor 小猫示例](assets/demo-cat.png)
+![DSH Pixel Editor cat example](assets/demo-cat.png)
 
-画布特写：
+Canvas close-up:
 
-![像素小猫画布](assets/demo-cat-canvas.png)
+![Pixel cat canvas](assets/demo-cat-canvas.png)
 
-透明背景使用标准方形棋盘格：
+The transparent canvas uses a standard square checkerboard:
 
-![标准透明棋盘格](assets/demo-transparency-grid.png)
+![Square transparency checkerboard](assets/demo-transparency-grid.png)
 
-## 原理
+## How it works
 
-- **宿主端**（`lib/index.js`）：仅作为 loader 行存在，让 `dsh.client` 声明被扫描；编辑器本身 100% 运行在浏览器里。
-- **客户端**（`client/client.js`）：遵循 `window.__ModuleLoader__.load({ id, factory })` 契约，通过 `ctx.slots` 注册到 `conversation.session.header.actions`（头部按钮）和 `conversation.input.dock`（停靠面板）。
-- **编解码**（`src/ase-codec.js`）：按 [Aseprite 官方文件格式规范](https://github.com/aseprite/aseprite/blob/main/docs/ase-file-specs.md) 实现，写入 32bpp RGBA + raw cel + 新版调色板 chunk，Aseprite 可直接打开。
+- **Host** (`lib/index.js`): a minimal loader entry that exposes the `dsh.client` declaration; the editor runs entirely in the browser.
+- **Client** (`client/client.js`): follows the `window.__ModuleLoader__.load({ id, factory })` contract and registers the header button and dock through `ctx.slots` at `conversation.session.header.actions` and `conversation.input.dock`.
+- **Codec** (`src/ase-codec.js`): implements the [Aseprite file format specification](https://github.com/aseprite/aseprite/blob/main/docs/ase-file-specs.md), writing 32bpp RGBA, raw cels, and modern palette chunks that Aseprite can open directly.
 
-## 目录结构
+## Project structure
 
-```
+```text
 dsh-aseprite/
-├── package.json        # dsh.bundle.patch + dsh.client 声明
-├── cordis.patch.yml    # loader 行：- id: aseprite, name: 'dsh-aseprite'
-├── lib/index.js        # 宿主端（极简）
-├── client/client.js    # 浏览器 bundle（构建产物）
-├── src/ase-codec.js    # ASE 二进制编解码
-├── src/editor.js       # 文档模型 + 绘制/图层/帧操作 + 导出
+├── package.json        # dsh.bundle.patch + dsh.client declarations
+├── README.md           # English documentation
+├── README.zh-CN.md     # Chinese documentation
+├── LICENSE
+├── assets/             # GitHub demo images
+├── cordis.patch.yml    # loader row: - id: aseprite, name: 'dsh-aseprite'
+├── lib/index.js        # minimal host entry
+├── client/client.js    # browser bundle (generated)
+├── src/ase-codec.js    # ASE binary codec
+├── src/editor.js       # document model, drawing, layers, frames, and export
 ├── src/client.js       # React UI + apply()
-└── scripts/build.mjs   # 零依赖构建脚本
+└── scripts/build.mjs   # zero-dependency build script
 ```
 
-## 开发 / 构建
+## Development / build
 
 ```powershell
-node scripts/build.mjs      # 重新生成 client/client.js
+node scripts/build.mjs      # regenerate client/client.js
 ```
 
-## 安装（本机）
+## Install locally
 
-已通过 `dsh plugin --profile web add` 安装。手动重装：
+Install with `dsh plugin --profile web add`. To reinstall manually:
 
 ```powershell
-# 注意：本机 pnpm 全局 store 配置异常，需要显式传 store-dir
+# Replace these placeholders with your local paths; omit --store-dir if it is not needed
 dsh plugin --profile web add --store-dir "<your-pnpm-store>" "file:<path-to-dsh-aseprite>"
 ```
 
-装完后**重启 DeepSeek Harness**（关闭并重新打开），刷新页面，会话头部出现 🎨 按钮即成功。
+Restart DeepSeek Harness after installation, then refresh the page. The 🎨 button in the conversation header confirms that the plugin is loaded.
 
-## 卸载
+## Uninstall
 
 ```powershell
 dsh plugin --profile web remove dsh-aseprite
 ```
-并删除 profile `cordis.patch.yml` 里手写的 `aseprite` 条目（如有），重启应用。
+
+If present, also remove the handwritten `aseprite` entry from the profile `cordis.patch.yml`, then restart the application.
