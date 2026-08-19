@@ -5,7 +5,7 @@
 A pixel-art and sprite-animation editor plugin for DeepSeek Harness. It is compatible with Aseprite project files and requires no Aseprite installation.
 
 - 🎨 Adds a **🎨** button to the conversation header; click it to open or close the editor dock above the message input.
-- ✏️ Tools: pencil, eraser, bucket fill, picker, line, and rectangle, with undo, redo, wheel zoom, grid, onion skinning, and adjustable brush/eraser size.
+- ✏️ Tools: pencil, eraser, bucket fill, picker, line, and rectangle, with undo, redo, wheel zoom, grid, onion skinning, adjustable brush/eraser size, and draggable panel splitters.
 - 🧅 Layers: create, delete, reorder, and toggle visibility.
 - 🎞️ Animation frames: add, duplicate, delete, set frame duration (ms), and preview playback.
 - 🎨 Palettes: built-in DB16 and PICO-8-style 16-color palettes, custom colors, extra palettes, and color picking.

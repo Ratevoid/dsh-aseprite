@@ -772,6 +772,9 @@ function makeInitial() {
     color: { r: 0, g: 0, b: 0, a: 255 },
     zoom: 8,
     brushSize: 1,
+    leftRatio: 0.18,
+    rightRatio: 0.20,
+    panelHeight: null,
     playing: false,
     onion: false,
     showNew: false,
@@ -891,6 +894,9 @@ function zoomStep(value, direction) {
 }
 function clampBrushSize(value) {
   return Math.max(1, Math.min(32, Math.round(Number(value) || 1)))
+}
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value))
 }
 
 function Toolbar({ t, onUndo, onRedo, canUndo, canRedo, onOpen, onSave, onExport, onNew }) {
@@ -1311,11 +1317,14 @@ function NewDialog({ t, onClose }) {
 // ── main panel ──────────────────────────────────────────────────────────────
 function EditorPanel({ t }) {
   const s = useAse()
+  const rootRef = React.useRef(null)
+  const bodyRef = React.useRef(null)
+  const resize = React.useRef(null)
   const handleCanvasWheel = (e) => {
     e.preventDefault()
     const direction = e.deltaY < 0 ? 1 : e.deltaY > 0 ? -1 : 0
     if (!direction) return
-    const previous = s.zoom
+    const previous = snapshot.zoom
     const next = zoomStep(previous, direction)
     if (next === previous) return
     const host = e.currentTarget
@@ -1332,8 +1341,52 @@ function EditorPanel({ t }) {
       host.scrollTop = anchorY * ratio - cursorY
     })
   }
+  const endResize = () => {
+    resize.current = null
+    window.removeEventListener('pointermove', moveResize)
+    window.removeEventListener('pointerup', endResize)
+  }
+  const moveResize = (e) => {
+    const active = resize.current
+    if (!active) return
+    e.preventDefault()
+    if (active.axis === 'height') {
+      const next = clampNumber(active.startHeight + e.clientY - active.startY, 360, Math.min(720, Math.max(360, window.innerHeight * 0.9)))
+      set({ panelHeight: next })
+      return
+    }
+    const width = bodyRef.current?.getBoundingClientRect().width || 1
+    const delta = (e.clientX - active.startX) / width
+    if (active.axis === 'left') {
+      const max = Math.min(0.36, 1 - active.startRight - 0.24)
+      set({ leftRatio: clampNumber(active.startLeft + delta, 0.12, max) })
+    } else {
+      const max = Math.min(0.36, 1 - active.startLeft - 0.24)
+      set({ rightRatio: clampNumber(active.startRight - delta, 0.14, max) })
+    }
+  }
+  const beginResize = (axis, e) => {
+    e.preventDefault()
+    const rootBox = rootRef.current?.getBoundingClientRect()
+    resize.current = {
+      axis,
+      startX: e.clientX,
+      startY: e.clientY,
+      startLeft: s.leftRatio,
+      startRight: s.rightRatio,
+      startHeight: rootBox?.height || 560
+    }
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch (_) {}
+    window.addEventListener('pointermove', moveResize, { passive: false })
+    window.addEventListener('pointerup', endResize)
+  }
   if (!s.open) return null
-  return h('div', { className: 'ase-root', 'data-ase-root': '' },
+  return h('div', {
+    ref: rootRef,
+    className: 'ase-root',
+    'data-ase-root': '',
+    style: s.panelHeight ? { height: s.panelHeight + 'px' } : undefined
+  },
     h(Toolbar, {
       t,
       canUndo: s.history.canUndo(),
@@ -1349,7 +1402,11 @@ function EditorPanel({ t }) {
           h('span', {}, s.error),
           h('button', { type: 'button', className: 'ase-btn ase-mini', onClick: () => set({ error: null }) }, '✕'))
       : null,
-    h('div', { className: 'ase-body' },
+    h('div', {
+      ref: bodyRef,
+      className: 'ase-body',
+      style: { gridTemplateColumns: (s.leftRatio * 100) + '% minmax(0, 1fr) ' + (s.rightRatio * 100) + '%' }
+    },
       h('div', { className: 'ase-left' },
         h(PalettePanel, { t }),
         h(LayersPanel, { t })
@@ -1362,8 +1419,25 @@ function EditorPanel({ t }) {
       ),
       h('div', { className: 'ase-right' },
         h(FramesPanel, { t })
-      )
+      ),
+      h('div', {
+        className: 'ase-resize-grip ase-resize-x ase-resize-left',
+        style: { left: 'calc(' + (s.leftRatio * 100) + '% - 4px)' },
+        title: t('action.resizePanel'),
+        onPointerDown: (e) => beginResize('left', e)
+      }),
+      h('div', {
+        className: 'ase-resize-grip ase-resize-x ase-resize-right',
+        style: { left: 'calc(' + ((1 - s.rightRatio) * 100) + '% - 4px)' },
+        title: t('action.resizePanel'),
+        onPointerDown: (e) => beginResize('right', e)
+      })
     ),
+    h('div', {
+      className: 'ase-resize-grip ase-resize-y ase-resize-bottom',
+      title: t('action.resizePanel'),
+      onPointerDown: (e) => beginResize('height', e)
+    }),
     s.showNew ? h(NewDialog, { t, onClose: () => set({ showNew: false }) }) : null
   )
 }
@@ -1429,6 +1503,7 @@ const zh = {
   'action.customColor': '自定义颜色',
   'action.addColor': '加入调色板',
   'action.cancel': '取消',
+  'action.resizePanel': '拖拽调整面板大小',
   'action.create': '创建',
   'dialog.new': '新建精灵',
   'dialog.width': '宽度',
@@ -1470,6 +1545,7 @@ const en = {
   'action.customColor': 'Custom color',
   'action.addColor': 'Add to palette',
   'action.cancel': 'Cancel',
+  'action.resizePanel': 'Drag to resize panel',
   'action.create': 'Create',
   'dialog.new': 'New sprite',
   'dialog.width': 'Width',
@@ -1569,6 +1645,7 @@ function ensureStyles() {
   min-height: 0;
   flex: 1;
   overflow: hidden;
+  position: relative;
 }
 .ase-left { display: flex; flex-direction: column; gap: 8px; width: auto; min-width: 0; }
 .ase-right { width: auto; min-width: 0; min-height: 0; }
@@ -1589,6 +1666,27 @@ function ensureStyles() {
   justify-content: center;
   gap: 8px;
 }
+.ase-resize-grip {
+  position: absolute;
+  z-index: 20;
+  touch-action: none;
+  background: transparent;
+}
+.ase-resize-grip:hover,
+.ase-resize-grip:active { background: color-mix(in srgb, var(--ase-accent) 45%, transparent); }
+.ase-resize-x {
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+}
+.ase-resize-y {
+  left: 0;
+  right: 0;
+  height: 8px;
+  cursor: row-resize;
+}
+.ase-resize-bottom { position: relative; flex: none; margin-top: -1px; }
 @media (max-width: 720px) {
   .ase-body { grid-template-columns: minmax(112px, 22%) minmax(0, 1fr) minmax(132px, 24%); gap: 6px; padding: 6px; }
   .ase-toolbar { padding-left: 6px; padding-right: 6px; }
