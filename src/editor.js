@@ -161,14 +161,28 @@ export function setPixel(doc, frameIdx, layerIdx, x, y, color) {
   return true
 }
 
-/** Draw a straight line. */
-export function drawLine(doc, frameIdx, layerIdx, x0, y0, x1, y1, color) {
+/** Stamp a square pixel brush centered on (x,y). */
+export function drawBrush(doc, frameIdx, layerIdx, x, y, color, size = 1) {
+  const brush = Math.max(1, Math.round(Number(size) || 1))
+  const startX = x - Math.floor((brush - 1) / 2)
+  const startY = y - Math.floor((brush - 1) / 2)
+  let changed = false
+  for (let yy = startY; yy < startY + brush; yy++) {
+    for (let xx = startX; xx < startX + brush; xx++) {
+      changed = setPixel(doc, frameIdx, layerIdx, xx, yy, color) || changed
+    }
+  }
+  return changed
+}
+
+/** Draw a straight line with an optional square brush size. */
+export function drawLine(doc, frameIdx, layerIdx, x0, y0, x1, y1, color, size = 1) {
   const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0)
   const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1
   let err = dx + dy
   let changed = false
   for (;;) {
-    changed = setPixel(doc, frameIdx, layerIdx, x0, y0, color) || changed
+    changed = drawBrush(doc, frameIdx, layerIdx, x0, y0, color, size) || changed
     if (x0 === x1 && y0 === y1) break
     const e2 = 2 * err
     if (e2 >= dy) { err += dy; x0 += sx }
@@ -177,15 +191,15 @@ export function drawLine(doc, frameIdx, layerIdx, x0, y0, x1, y1, color) {
   return changed
 }
 
-/** Draw a rectangle outline (or filled when fill=true). */
-export function drawRect(doc, frameIdx, layerIdx, x0, y0, x1, y1, color, fill) {
+/** Draw a rectangle outline (or filled when fill=true) with an optional brush size. */
+export function drawRect(doc, frameIdx, layerIdx, x0, y0, x1, y1, color, fill, size = 1) {
   const minX = Math.min(x0, x1), maxX = Math.max(x0, x1)
   const minY = Math.min(y0, y1), maxY = Math.max(y0, y1)
   let changed = false
   for (let y = minY; y <= maxY; y++) {
     for (let x = minX; x <= maxX; x++) {
       if (fill || x === minX || x === maxX || y === minY || y === maxY) {
-        changed = setPixel(doc, frameIdx, layerIdx, x, y, color) || changed
+        changed = drawBrush(doc, frameIdx, layerIdx, x, y, color, size) || changed
       }
     }
   }

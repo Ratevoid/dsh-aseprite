@@ -9,7 +9,7 @@
 import { parseAseprite, serializeAseprite, ASEError } from './ase-codec.js'
 import {
   newSprite, cloneDoc, History, compositeFrame,
-  setPixel, drawLine, drawRect, floodFill, pickPixel,
+  setPixel, drawBrush, drawLine, drawRect, floodFill, pickPixel,
   addLayer, removeLayer, moveLayer,
   addFrame, duplicateFrame, removeFrame, moveFrame,
   frameToPng, sheetToPng
@@ -56,6 +56,7 @@ function makeInitial() {
     tool: 'pencil',
     color: { r: 0, g: 0, b: 0, a: 255 },
     zoom: 8,
+    brushSize: 1,
     playing: false,
     onion: false,
     showNew: false,
@@ -165,6 +166,17 @@ function HeaderAction() {
 const TOOLS = [
   ['pencil', '✏️'], ['eraser', '◻️'], ['fill', '🪣'], ['picker', '💉'], ['line', '📏'], ['rect', '▭']
 ]
+const ZOOM_STEPS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]
+function zoomStep(value, direction) {
+  const current = Number(value) || 1
+  let index = ZOOM_STEPS.findIndex((n) => n >= current)
+  if (index < 0) index = ZOOM_STEPS.length - 1
+  if (ZOOM_STEPS[index] !== current && direction < 0) index--
+  return ZOOM_STEPS[Math.max(0, Math.min(ZOOM_STEPS.length - 1, index + (direction > 0 ? 1 : direction < 0 ? -1 : 0)))]
+}
+function clampBrushSize(value) {
+  return Math.max(1, Math.min(32, Math.round(Number(value) || 1)))
+}
 
 function Toolbar({ t, onUndo, onRedo, canUndo, canRedo, onOpen, onSave, onExport, onNew }) {
   const s = useAse()
@@ -184,10 +196,24 @@ function Toolbar({ t, onUndo, onRedo, canUndo, canRedo, onOpen, onSave, onExport
       h('button', { type: 'button', className: 'ase-btn', title: t('action.undo'), disabled: !canUndo, onClick: onUndo }, '↶'),
       h('button', { type: 'button', className: 'ase-btn', title: t('action.redo'), disabled: !canRedo, onClick: onRedo }, '↷')
     ),
-    h('div', { className: 'ase-tool-group' },
-      h('button', { type: 'button', className: 'ase-btn', title: t('action.zoomOut'), onClick: () => set({ zoom: Math.max(1, s.zoom / 2) }) }, '−'),
+    h('div', { className: 'ase-tool-group ase-zoom-group' },
+      h('button', { type: 'button', className: 'ase-btn', title: t('action.zoomOut'), onClick: () => set({ zoom: zoomStep(s.zoom, -1) }) }, '−'),
       h('span', { className: 'ase-zoom-label' }, '×' + s.zoom),
-      h('button', { type: 'button', className: 'ase-btn', title: t('action.zoomIn'), onClick: () => set({ zoom: Math.min(64, s.zoom * 2) }) }, '+')
+      h('button', { type: 'button', className: 'ase-btn', title: t('action.zoomIn'), onClick: () => set({ zoom: zoomStep(s.zoom, 1) }) }, '+')
+    ),
+    h('div', { className: 'ase-tool-group ase-brush-control' },
+      h('span', { className: 'ase-brush-label' }, '✹'),
+      h('input', {
+        type: 'range', min: 1, max: 32, step: 1, value: s.brushSize,
+        title: t('action.brushSize'), 'aria-label': t('action.brushSize'),
+        onChange: (e) => set({ brushSize: clampBrushSize(e.target.value) })
+      }),
+      h('input', {
+        type: 'number', min: 1, max: 32, step: 1, value: s.brushSize,
+        title: t('action.brushSize'), 'aria-label': t('action.brushSize'),
+        onChange: (e) => set({ brushSize: clampBrushSize(e.target.value) })
+      }),
+      h('span', { className: 'ase-brush-unit' }, 'px')
     ),
     h('div', { className: 'ase-tool-group' },
       h('label', { className: 'ase-btn ase-file-btn', title: t('action.open') },
@@ -263,7 +289,7 @@ function CanvasView({ t }) {
     const working = cloneDoc(s.doc)
     if (s.tool === 'pencil' || s.tool === 'eraser') {
       const c = s.tool === 'eraser' ? { r: 0, g: 0, b: 0, a: 0 } : color
-      setPixel(working, s.frame, s.layer, x, y, c)
+      drawBrush(working, s.frame, s.layer, x, y, c, s.brushSize)
     }
     drag.current = {
       startX: x, startY: y, curX: x, curY: y,
@@ -294,7 +320,7 @@ function CanvasView({ t }) {
       moved = true
       if (s.tool === 'pencil' || s.tool === 'eraser') {
         // Interpolate each coalesced segment so fast strokes stay continuous.
-        drawLine(d.working, s.frame, s.layer, prevX, prevY, x, y, color)
+        drawLine(d.working, s.frame, s.layer, prevX, prevY, x, y, color, s.brushSize)
       }
     }
     if (!moved) return
@@ -332,8 +358,8 @@ function CanvasView({ t }) {
     } else if (s.tool === 'line' || s.tool === 'rect') {
       const color = s.color
       const doc = cloneDoc(d.working)
-      if (s.tool === 'line') drawLine(doc, s.frame, s.layer, d.startX, d.startY, d.curX, d.curY, color)
-      else drawRect(doc, s.frame, s.layer, d.startX, d.startY, d.curX, d.curY, color, false)
+      if (s.tool === 'line') drawLine(doc, s.frame, s.layer, d.startX, d.startY, d.curX, d.curY, color, s.brushSize)
+      else drawRect(doc, s.frame, s.layer, d.startX, d.startY, d.curX, d.curY, color, false, s.brushSize)
       set({ doc })
       clearPreview()
     }
@@ -349,6 +375,9 @@ function CanvasView({ t }) {
     ctx.clearRect(0, 0, w, h)
     const c = s.color
     ctx.fillStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + c.a / 255 + ')'
+    ctx.strokeStyle = ctx.fillStyle
+    ctx.lineWidth = Math.max(1, s.brushSize)
+    ctx.lineCap = 'square'
     if (s.tool === 'line') {
       ctx.beginPath()
       ctx.moveTo(d.startX + 0.5, d.startY + 0.5)
@@ -567,6 +596,27 @@ function NewDialog({ t, onClose }) {
 // ── main panel ──────────────────────────────────────────────────────────────
 function EditorPanel({ t }) {
   const s = useAse()
+  const handleCanvasWheel = (e) => {
+    e.preventDefault()
+    const direction = e.deltaY < 0 ? 1 : e.deltaY > 0 ? -1 : 0
+    if (!direction) return
+    const previous = s.zoom
+    const next = zoomStep(previous, direction)
+    if (next === previous) return
+    const host = e.currentTarget
+    const rect = host.getBoundingClientRect()
+    const cursorX = e.clientX - rect.left
+    const cursorY = e.clientY - rect.top
+    const anchorX = cursorX + host.scrollLeft
+    const anchorY = cursorY + host.scrollTop
+    set({ zoom: next })
+    window.requestAnimationFrame(() => {
+      if (!host.isConnected) return
+      const ratio = next / previous
+      host.scrollLeft = anchorX * ratio - cursorX
+      host.scrollTop = anchorY * ratio - cursorY
+    })
+  }
   if (!s.open) return null
   return h('div', { className: 'ase-root', 'data-ase-root': '' },
     h(Toolbar, {
@@ -589,9 +639,11 @@ function EditorPanel({ t }) {
         h(PalettePanel, { t }),
         h(LayersPanel, { t })
       ),
-      h('div', { className: 'ase-center' },
-        h(CanvasView, { t }),
-        h('div', { className: 'ase-hint' }, s.doc.width + '×' + s.doc.height + ' · ' + s.doc.frames.length + 'f · ' + s.doc.layers.length + 'L')
+      h('div', { className: 'ase-center', onWheel: handleCanvasWheel },
+        h('div', { className: 'ase-center-stage' },
+          h(CanvasView, { t }),
+          h('div', { className: 'ase-hint' }, s.doc.width + '×' + s.doc.height + ' · ' + s.doc.frames.length + 'f · ' + s.doc.layers.length + 'L')
+        )
       ),
       h('div', { className: 'ase-right' },
         h(FramesPanel, { t })
@@ -642,6 +694,7 @@ const zh = {
   'action.redo': '重做',
   'action.zoomIn': '放大',
   'action.zoomOut': '缩小',
+  'action.brushSize': '笔刷/橡皮大小',
   'action.open': '打开 .aseprite',
   'action.save': '保存为 .aseprite',
   'action.new': '新建精灵',
@@ -682,6 +735,7 @@ const en = {
   'action.redo': 'Redo',
   'action.zoomIn': 'Zoom in',
   'action.zoomOut': 'Zoom out',
+  'action.brushSize': 'Brush / eraser size',
   'action.open': 'Open .aseprite',
   'action.save': 'Save .aseprite',
   'action.new': 'New sprite',
@@ -739,11 +793,14 @@ function ensureStyles() {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  max-height: min(78vh, 720px);
+  min-height: 360px;
   font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 .ase-toolbar {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 10px;
+  row-gap: 6px;
   border-bottom: 1px solid var(--ase-border);
   flex-wrap: wrap;
 }
@@ -762,7 +819,15 @@ function ensureStyles() {
 .ase-tool.ase-active, .ase-btn.ase-active { border-color: var(--ase-accent); color: var(--ase-accent); background: color-mix(in srgb, var(--ase-accent) 12%, transparent); }
 .ase-mini { padding: 0 5px; font-size: 12px; }
 .ase-danger:hover:not(:disabled) { border-color: var(--ase-danger); color: var(--ase-danger); }
-.ase-zoom-label { font-size: 12px; color: var(--ase-text-dim); min-width: 34px; text-align: center; }
+.ase-zoom-label { font-size: 12px; color: var(--ase-text-dim); min-width: 38px; text-align: center; }
+.ase-brush-control { gap: 5px; }
+.ase-brush-label { color: var(--ase-text-dim); font-size: 15px; }
+.ase-brush-control input[type=range] { width: 72px; accent-color: var(--ase-accent); cursor: pointer; }
+.ase-brush-control input[type=number] {
+  width: 42px; padding: 2px 4px; font-size: 12px;
+  color: var(--ase-text); background: transparent; border: 1px solid var(--ase-border); border-radius: 4px;
+}
+.ase-brush-unit { color: var(--ase-text-dim); font-size: 11px; }
 .ase-file-btn { display: inline-flex; align-items: center; }
 
 .ase-header-btn {
@@ -782,18 +847,37 @@ function ensureStyles() {
 }
 
 .ase-body {
-  display: flex;
-  gap: 10px;
-  padding: 10px;
+  display: grid;
+  grid-template-columns: minmax(126px, 18%) minmax(0, 1fr) minmax(150px, 20%);
+  gap: 8px;
+  padding: 8px;
   min-height: 0;
   flex: 1;
+  overflow: hidden;
 }
-.ase-left { display: flex; flex-direction: column; gap: 10px; width: 210px; flex: none; }
-.ase-right { width: 240px; flex: none; min-height: 0; }
+.ase-left { display: flex; flex-direction: column; gap: 8px; width: auto; min-width: 0; }
+.ase-right { width: auto; min-width: 0; min-height: 0; }
 .ase-center {
-  flex: 1; min-width: 0;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  min-width: 0; min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
+}
+.ase-center-stage {
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+  min-height: 100%;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+@media (max-width: 720px) {
+  .ase-body { grid-template-columns: minmax(112px, 22%) minmax(0, 1fr) minmax(132px, 24%); gap: 6px; padding: 6px; }
+  .ase-toolbar { padding-left: 6px; padding-right: 6px; }
+  .ase-file-name { max-width: 120px; }
 }
 .ase-hint { color: var(--ase-text-dim); font-size: 12px; }
 
@@ -853,7 +937,7 @@ function ensureStyles() {
 .ase-canvas-wrap {
   position: relative;
   flex: none;
-  display: inline-block;
+  display: block;
 }
 .ase-canvas-checker {
   position: absolute; inset: 0;
