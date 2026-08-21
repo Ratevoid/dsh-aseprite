@@ -1525,8 +1525,9 @@ function EditorPanel({ t, askSelection }) {
     const active = resize.current
     if (!active) return
     e.preventDefault()
-    if (active.axis === 'height') {
-      const next = clampNumber(active.startHeight + e.clientY - active.startY, 360, Math.min(720, Math.max(360, window.innerHeight * 0.9)))
+    if (active.axis === 'height' || active.axis === 'height-top') {
+      const delta = active.axis === 'height-top' ? active.startY - e.clientY : e.clientY - active.startY
+      const next = clampNumber(active.startHeight + delta, 360, Math.min(720, Math.max(360, window.innerHeight * 0.9)))
       set({ panelHeight: next })
       return
     }
@@ -1562,6 +1563,11 @@ function EditorPanel({ t, askSelection }) {
     'data-ase-root': '',
     style: s.panelHeight ? { height: s.panelHeight + 'px' } : undefined
   },
+    h('div', {
+      className: 'ase-resize-grip ase-resize-y ase-resize-top',
+      title: t('action.resizePanel'),
+      onPointerDown: (e) => beginResize('height-top', e)
+    }),
     h(Toolbar, {
       t,
       canUndo: s.history.canUndo(),
@@ -1907,6 +1913,7 @@ function ensureStyles() {
   height: 8px;
   cursor: row-resize;
 }
+.ase-resize-top { position: relative; flex: none; margin-bottom: -1px; }
 .ase-resize-bottom { position: relative; flex: none; margin-top: -1px; }
 @media (max-width: 720px) {
   .ase-body { grid-template-columns: minmax(112px, 22%) minmax(0, 1fr) minmax(132px, 24%); gap: 6px; padding: 6px; }

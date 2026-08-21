@@ -5,7 +5,7 @@
 A pixel-art and sprite-animation editor plugin for DeepSeek Harness. It is compatible with Aseprite project files and requires no Aseprite installation.
 
 - 🎨 Adds a **🎨** button to the conversation header; click it to open or close the editor dock above the message input.
-- ✏️ Tools: pencil, eraser, bucket fill, picker, line, rectangle, and rectangular region selection, with undo, redo, wheel zoom, grid, onion skinning, adjustable brush/eraser size, and draggable panel splitters.
+- ✏️ Tools: pencil, eraser, bucket fill, picker, line, rectangle, and rectangular region selection, with undo, redo, wheel zoom, grid, onion skinning, adjustable brush/eraser size, and draggable left/right/top/bottom panel splitters.
 - 🤖 Select a region, click **ASK**, describe a local adjustment, and send an enlarged PNG crop plus the selection coordinates to the active DSH conversation. The AI response is reviewed in chat; editor pixels are not changed automatically.
 - 🧅 Layers: create, delete, reorder, and toggle visibility.
 - 🎞️ Animation frames: add, duplicate, delete, set frame duration (ms), and preview playback.
