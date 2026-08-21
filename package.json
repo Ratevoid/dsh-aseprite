@@ -1,9 +1,13 @@
 {
   "name": "dsh-aseprite",
-  "version": "0.2.1",
-  "description": "在 DSH Web UI 里作像素画/精灵动画的内嵌编辑器：画布+图层+帧动画+调色板，用 JS 直接读写 Aseprite (.aseprite) 工程文件，不依赖安装 Aseprite。",
+  "version": "0.3.0",
+  "description": "在 DSH Web UI 里作像素画/精灵动画的内嵌编辑器：画布+图层+帧动画+调色板+可视化蓝图工作流，用 JS 直接读写 Aseprite (.aseprite) 工程文件，不依赖安装 Aseprite。",
   "license": "MIT",
   "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test:blueprints": "node tests/blueprints.test.mjs"
+  },
   "main": "lib/index.js",
   "keywords": [
     "dsh",
@@ -40,8 +44,8 @@
         "en": "Pixel Editor"
       },
       "summary": {
-        "zh-CN": "在 DSH 网页 GUI 里直接绘制像素画与精灵动画（图层/帧/调色板），支持框选区域并 ASK 当前会话 AI 做局部调整，读写 Aseprite .aseprite 工程文件，无需安装 Aseprite。",
-        "en": "Pixel-art & sprite animation editor inside the DSH web GUI (layers/frames/palette), with selection ASK prompts for local AI adjustments; reads/writes Aseprite .aseprite files with no Aseprite install needed."
+        "zh-CN": "在 DSH 网页 GUI 里直接绘制像素画与精灵动画（图层/帧/调色板），支持 ASK 局部调整和 ComfyUI 风格的主动/被动蓝图工作流，读写 Aseprite .aseprite 工程文件，无需安装 Aseprite。",
+        "en": "Pixel-art & sprite animation editor inside the DSH web GUI (layers/frames/palette), with selection ASK prompts and ComfyUI-style active/passive blueprint workflows; reads/writes Aseprite .aseprite files with no Aseprite install needed."
       },
       "category": "media"
     },

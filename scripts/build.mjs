@@ -35,6 +35,7 @@ function stripEsm(src) {
 
 const codec = stripEsm(readFileSync(resolve(root, 'src/ase-codec.js'), 'utf8'))
 const editor = stripEsm(readFileSync(resolve(root, 'src/editor.js'), 'utf8'))
+const blueprints = stripEsm(readFileSync(resolve(root, 'src/blueprints.js'), 'utf8'))
 const client = stripEsm(readFileSync(resolve(root, 'src/client.js'), 'utf8'))
 
 const out = [
@@ -50,6 +51,8 @@ const out = [
   codec,
   '',
   editor,
+  '',
+  blueprints,
   '',
   client,
   '',
