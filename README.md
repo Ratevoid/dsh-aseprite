@@ -7,6 +7,10 @@ A pixel-art and sprite-animation editor plugin for DeepSeek Harness. It is compa
 - 🎨 Adds a **🎨** button to the conversation header; click it to open or close the editor dock above the message input.
 - ✏️ Tools: pencil, eraser, bucket fill, picker, line, rectangle, and rectangular region selection, with undo, redo, wheel zoom, grid, onion skinning, adjustable brush/eraser size, and draggable left/right/top/bottom panel splitters.
 - 🤖 Select a region, click **ASK**, describe a local adjustment, and send an enlarged PNG crop plus the selection coordinates to the active DSH conversation. The AI response is reviewed in chat; editor pixels are not changed automatically.
+- 🧩 **Blueprint workflows**: click 🧩 in the toolbar to open a ComfyUI-style visual node graph; drag nodes and click input/output ports to connect them.
+  - **Passive blueprints** such as transparent cropping, pixel outlines, and crop-plus-outline run locally, can be reused indefinitely after one creation, and never call the LLM.
+  - **Active blueprints** contain an LLM node and send the selected image plus node prompt to the current conversation AI.
+  - Click **AI Create Blueprint** and describe a complete task. The assistant's dsh-blueprint JSON is automatically parsed, validated, and stored in the browser library—no manual JSON copying. The library has UI import/export controls.
 - 🧅 Layers: create, delete, reorder, and toggle visibility.
 - 🎞️ Animation frames: add, duplicate, delete, set frame duration (ms), and preview playback.
 - 🎨 Palettes: built-in DB16 and PICO-8-style 16-color palettes, custom colors, extra palettes, and color picking.
@@ -44,7 +48,9 @@ dsh-aseprite/
 ├── client/client.js    # browser bundle (generated)
 ├── src/ase-codec.js    # ASE binary codec
 ├── src/editor.js       # document model, drawing, layers, frames, and export
+├── src/blueprints.js   # safe declarative blueprint graph engine and library
 ├── src/client.js       # React UI + apply()
+├── tests/blueprints.test.mjs # blueprint normalization/execution/parser tests
 └── scripts/build.mjs   # zero-dependency build script
 ```
 
@@ -52,6 +58,7 @@ dsh-aseprite/
 
 ```powershell
 node scripts/build.mjs      # regenerate client/client.js
+pnpm test:blueprints       # run blueprint engine tests
 ```
 
 ## Install locally

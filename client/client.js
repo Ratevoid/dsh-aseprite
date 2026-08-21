@@ -750,6 +750,393 @@ function sheetToPng(doc, scale = 1) {
 
 
 /**
+ * Declarative, safe blueprint workflows for dsh-aseprite.
+ *
+ * Blueprints are data, not code. AI may create the graph, but execution is
+ * limited to the operations interpreted below; arbitrary JavaScript is never
+ * evaluated. The client stores the normalized library in localStorage.
+ */
+
+const BLUEPRINT_STORAGE_KEY = 'dsh-aseprite:blueprints:v1'
+const BLUEPRINT_SCHEMA_VERSION = 1
+const MAX_BLUEPRINTS = 64
+const MAX_NODES = 32
+const MAX_EDGES = 64
+const ALLOWED_TYPES = new Set(['input', 'crop', 'outline', 'llm', 'output'])
+
+const blueprintListeners = new Set()
+let blueprintList = []
+let blueprintRevision = 0
+let blueprintSnapshot = { list: blueprintList, revision: blueprintRevision }
+
+function blueprintId(prefix = 'blueprint') {
+  const random = Math.random().toString(36).slice(2, 8)
+  return prefix + '-' + Date.now().toString(36) + '-' + random
+}
+
+function text(value, fallback = '', limit = 2400) {
+  return String(value ?? fallback).trim().slice(0, limit)
+}
+
+function number(value, fallback = 0) {
+  const result = Number(value)
+  return Number.isFinite(result) ? result : fallback
+}
+
+function color(value, fallback = [0, 0, 0, 255]) {
+  if (Array.isArray(value)) {
+    return [0, 1, 2, 3].map((i) => Math.max(0, Math.min(255, Math.round(number(value[i], fallback[i])))))
+  }
+  if (typeof value === 'string' && /^#[0-9a-f]{6,8}$/i.test(value)) {
+    const hex = value.slice(1)
+    return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16), hex.length >= 8 ? parseInt(hex.slice(6, 8), 16) : 255]
+  }
+  return fallback.slice()
+}
+
+function nodeType(node) {
+  const raw = text(node?.type || node?.op || node?.kind || 'input', 'input', 30).toLowerCase()
+  if (raw === 'source' || raw === 'input' || raw === 'image-input') return 'input'
+  if (raw === 'trim' || raw === 'autocrop' || raw === 'crop') return 'crop'
+  if (raw === 'border' || raw === 'stroke' || raw === 'outline') return 'outline'
+  if (raw === 'ai' || raw === 'ask' || raw === 'llm' || raw === 'active') return 'llm'
+  if (raw === 'sink' || raw === 'result' || raw === 'output') return 'output'
+  return null
+}
+
+function normalizeNode(raw, index) {
+  const type = nodeType(raw)
+  if (!type || !ALLOWED_TYPES.has(type)) return null
+  const id = text(raw?.id || type + '-' + (index + 1), type + '-' + (index + 1), 80).replace(/[^a-zA-Z0-9_-]/g, '-')
+  const params = {}
+  const input = raw?.params && typeof raw.params === 'object' ? raw.params : {}
+  if (type === 'crop') params.padding = Math.max(0, Math.min(64, Math.round(number(input.padding, 0))))
+  if (type === 'outline') {
+    params.thickness = Math.max(1, Math.min(16, Math.round(number(input.thickness, 1))))
+    params.color = color(input.color)
+  }
+  if (type === 'llm') params.prompt = text(input.prompt || raw?.prompt || '请保持像素画风格，对这张图做局部优化。', '请保持像素画风格，对这张图做局部优化。')
+  const position = raw?.position && typeof raw.position === 'object' ? raw.position : raw
+  return {
+    id,
+    type,
+    label: text(raw?.label || raw?.name || ({ input: '输入选区', crop: '裁剪透明边界', outline: '像素描边', llm: 'AI 局部处理', output: '输出' }[type]), type, 80),
+    mode: type === 'llm' ? 'active' : 'passive',
+    params,
+    position: { x: Math.max(12, Math.min(1400, number(position?.x, 24 + index * 190))), y: Math.max(12, Math.min(800, number(position?.y, 36 + (index % 2) * 88))) }
+  }
+}
+
+function normalizeEdge(raw) {
+  const from = typeof raw?.from === 'object' ? raw.from?.node || raw.from?.id : raw?.from
+  const to = typeof raw?.to === 'object' ? raw.to?.node || raw.to?.id : raw?.to
+  if (!from || !to) return null
+  return { from: text(from, '', 80), to: text(to, '', 80) }
+}
+
+function normalizeBlueprint(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const rawNodes = Array.isArray(raw.nodes) ? raw.nodes.slice(0, MAX_NODES) : []
+  const nodes = []
+  const nodeIds = new Set()
+  for (let index = 0; index < rawNodes.length; index++) {
+    const node = normalizeNode(rawNodes[index], index)
+    if (!node || nodeIds.has(node.id)) continue
+    nodeIds.add(node.id)
+    nodes.push(node)
+  }
+  if (nodes.length === 0 || !nodes.some((node) => node.type === 'input') || !nodes.some((node) => node.type === 'output')) return null
+  const ids = nodeIds
+  const edges = []
+  const seen = new Set()
+  for (const edge of (Array.isArray(raw.edges) ? raw.edges : []).slice(0, MAX_EDGES)) {
+    const normalized = normalizeEdge(edge)
+    if (!normalized || !ids.has(normalized.from) || !ids.has(normalized.to) || normalized.from === normalized.to) continue
+    const key = normalized.from + '>' + normalized.to
+    if (seen.has(key)) continue
+    seen.add(key)
+    edges.push(normalized)
+  }
+  const hasActive = nodes.some((node) => node.type === 'llm')
+  return {
+    schemaVersion: BLUEPRINT_SCHEMA_VERSION,
+    id: text(raw.id, blueprintId(), 100).replace(/[^a-zA-Z0-9_-]/g, '-'),
+    requestId: text(raw.requestId, '', 100),
+    name: text(raw.name || raw.title, '未命名蓝图', 80),
+    description: text(raw.description, hasActive ? '需要当前会话 AI 的可复用工作流。' : '不需要 AI 的本地像素工作流。', 360),
+    mode: hasActive || raw.mode === 'active' ? 'active' : 'passive',
+    nodes,
+    edges,
+    createdAt: number(raw.createdAt, Date.now()),
+    updatedAt: Date.now()
+  }
+}
+
+function defaultBlueprints() {
+  const make = (id, name, description, nodes, edges) => normalizeBlueprint({ id, name, description, nodes, edges })
+  return [
+    make('crop-selection', '裁剪透明边界', '自动移除选区四周透明空白。', [
+      { id: 'input', type: 'input', position: { x: 24, y: 60 } },
+      { id: 'crop', type: 'crop', params: { padding: 0 }, position: { x: 230, y: 60 } },
+      { id: 'output', type: 'output', position: { x: 436, y: 60 } }
+    ], [{ from: 'input', to: 'crop' }, { from: 'crop', to: 'output' }]),
+    make('outline-selection', '像素描边', '沿透明边缘生成一圈不覆盖原图的像素描边。', [
+      { id: 'input', type: 'input', position: { x: 24, y: 60 } },
+      { id: 'outline', type: 'outline', params: { thickness: 1, color: '#000000' }, position: { x: 230, y: 60 } },
+      { id: 'output', type: 'output', position: { x: 436, y: 60 } }
+    ], [{ from: 'input', to: 'outline' }, { from: 'outline', to: 'output' }]),
+    make('crop-outline', '裁剪并描边', '先裁剪透明边界，再对结果做像素描边。', [
+      { id: 'input', type: 'input', position: { x: 24, y: 60 } },
+      { id: 'crop', type: 'crop', params: { padding: 0 }, position: { x: 210, y: 24 } },
+      { id: 'outline', type: 'outline', params: { thickness: 1, color: '#000000' }, position: { x: 416, y: 96 } },
+      { id: 'output', type: 'output', position: { x: 622, y: 60 } }
+    ], [{ from: 'input', to: 'crop' }, { from: 'crop', to: 'outline' }, { from: 'outline', to: 'output' }]),
+    make('ai-pixel-polish', 'AI 像素润色', '把当前选区交给当前会话 AI，按蓝图提示进行局部处理。', [
+      { id: 'input', type: 'input', position: { x: 24, y: 60 } },
+      { id: 'llm', type: 'llm', params: { prompt: '请在不改变构图和像素风格的前提下，优化这张局部像素图。' }, position: { x: 230, y: 60 } },
+      { id: 'output', type: 'output', position: { x: 436, y: 60 } }
+    ], [{ from: 'input', to: 'llm' }, { from: 'llm', to: 'output' }])
+  ].filter(Boolean)
+}
+
+function readLibrary() {
+  try {
+    if (typeof localStorage === 'undefined') return []
+    const parsed = JSON.parse(localStorage.getItem(BLUEPRINT_STORAGE_KEY) || '[]')
+    const list = Array.isArray(parsed) ? parsed : parsed?.blueprints
+    return Array.isArray(list) ? list.map(normalizeBlueprint).filter(Boolean).slice(0, MAX_BLUEPRINTS) : []
+  } catch (_) {
+    return []
+  }
+}
+
+function writeLibrary() {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(BLUEPRINT_STORAGE_KEY, JSON.stringify(blueprintList))
+  } catch (_) {}
+}
+
+function publishLibrary() {
+  blueprintRevision++
+  blueprintSnapshot = { list: blueprintList, revision: blueprintRevision }
+  writeLibrary()
+  for (const listener of blueprintListeners) listener()
+}
+
+blueprintList = readLibrary()
+if (blueprintList.length === 0) {
+  blueprintList = defaultBlueprints()
+  writeLibrary()
+}
+blueprintSnapshot = { list: blueprintList, revision: blueprintRevision }
+
+function useBlueprints() {
+  return React.useSyncExternalStore(
+    (listener) => { blueprintListeners.add(listener); return () => blueprintListeners.delete(listener) },
+    () => blueprintSnapshot
+  )
+}
+
+function getBlueprints() {
+  return blueprintList.slice()
+}
+
+function upsertBlueprint(raw) {
+  const blueprint = normalizeBlueprint(raw)
+  if (!blueprint) throw new Error('蓝图格式无效或没有可执行节点')
+  const index = blueprintList.findIndex((item) => item.id === blueprint.id)
+  if (index >= 0) blueprintList = blueprintList.map((item, i) => i === index ? blueprint : item)
+  else blueprintList = [...blueprintList, blueprint].slice(-MAX_BLUEPRINTS)
+  publishLibrary()
+  return blueprint
+}
+
+function removeBlueprint(id) {
+  const next = blueprintList.filter((item) => item.id !== id)
+  if (next.length === blueprintList.length) return false
+  blueprintList = next
+  publishLibrary()
+  return true
+}
+
+function importBlueprintText(source) {
+  const parsed = JSON.parse(source)
+  const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.blueprints) ? parsed.blueprints : [parsed]
+  const imported = list.map(normalizeBlueprint).filter(Boolean)
+  if (imported.length === 0) throw new Error('文件中没有有效蓝图')
+  for (const blueprint of imported) upsertBlueprint(blueprint)
+  return imported
+}
+
+function exportBlueprintText() {
+  return JSON.stringify({ schemaVersion: BLUEPRINT_SCHEMA_VERSION, blueprints: blueprintList }, null, 2)
+}
+
+function blueprintPrompt(task, requestId) {
+  return [
+    '你是 dsh-aseprite 的蓝图设计器。请把下面的像素画任务设计成一个可复用的 ComfyUI 风格节点工作流。',
+    '请求 ID：' + requestId,
+    '相关标记：DSH_ASE_BLUEPRINT:' + requestId + '；JSON 的 requestId 必须原样等于该请求 ID。',
+    '用户任务：' + text(task, '请设计一个像素画处理工作流。', 1200),
+    '',
+    '安全约束：只允许使用 input、crop、outline、llm、output 五种节点；禁止输出 JavaScript、函数、脚本或任意代码。',
+    'crop 参数只能有 padding（0 到 64 的整数）；outline 参数只能有 thickness（1 到 16 的整数）和 color（#RRGGBB 或 #RRGGBBAA）；llm 参数只能有 prompt。',
+    '如果不需要模型，把 mode 设为 passive；只要包含 llm 节点就设为 active。',
+    '请在回答最后输出唯一一个 dsh-blueprint 代码块，代码块内必须是完整 JSON，不要在 JSON 外再包一层 markdown。',
+    'JSON 结构：{schemaVersion:1,requestId:"' + requestId + '",id,name,description,mode,nodes:[{id,type,label,params,position:{x,y}}],edges:[{from,to}]}。',
+    '蓝图必须包含 input 和 output，并保证 edges 形成从 input 到 output 的有向图。'
+  ].join('\n')
+}
+
+function extractBlueprintsFromText(source) {
+  const textSource = String(source || '').slice(0, 1024 * 1024)
+  const results = []
+  const fence = String.fromCharCode(96).repeat(3)
+  const pattern = new RegExp(fence + '(?:dsh-blueprint|blueprint(?:-json)?|json(?:\\s+dsh-blueprint)?)\\s*([\\s\\S]*?)' + fence, 'gi')
+  let match
+  while ((match = pattern.exec(textSource)) !== null) {
+    try {
+      const parsed = JSON.parse(match[1].trim())
+      const blueprint = normalizeBlueprint(parsed)
+      if (blueprint) results.push(blueprint)
+    } catch (_) {}
+  }
+  return results
+}
+
+function cloneImage(image) {
+  return { width: image.width, height: image.height, data: new Uint8ClampedArray(image.data) }
+}
+
+function cropImage(image, x, y, width, height) {
+  const sx = Math.max(0, Math.min(image.width - 1, Math.floor(x)))
+  const sy = Math.max(0, Math.min(image.height - 1, Math.floor(y)))
+  const sw = Math.max(1, Math.min(image.width - sx, Math.floor(width)))
+  const sh = Math.max(1, Math.min(image.height - sy, Math.floor(height)))
+  const data = new Uint8ClampedArray(sw * sh * 4)
+  for (let row = 0; row < sh; row++) data.set(image.data.subarray(((sy + row) * image.width + sx) * 4, ((sy + row) * image.width + sx + sw) * 4), row * sw * 4)
+  return { width: sw, height: sh, data }
+}
+
+function cropTransparent(image, padding = 0) {
+  let minX = image.width, minY = image.height, maxX = -1, maxY = -1
+  for (let y = 0; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      if (image.data[(y * image.width + x) * 4 + 3] === 0) continue
+      minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y)
+    }
+  }
+  if (maxX < 0) return cloneImage(image)
+  const pad = Math.max(0, Math.round(padding))
+  return cropImage(image, minX - pad, minY - pad, maxX - minX + 1 + pad * 2, maxY - minY + 1 + pad * 2)
+}
+
+function outlineImage(image, thickness = 1, rgba = [0, 0, 0, 255]) {
+  const result = cloneImage(image)
+  const radius = Math.max(1, Math.round(thickness))
+  for (let y = 0; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      const target = (y * image.width + x) * 4
+      if (image.data[target + 3] !== 0) continue
+      let hit = false
+      for (let oy = -radius; oy <= radius && !hit; oy++) {
+        for (let ox = -radius; ox <= radius; ox++) {
+          if (Math.max(Math.abs(ox), Math.abs(oy)) > radius) continue
+          const nx = x + ox, ny = y + oy
+          if (nx < 0 || nx >= image.width || ny < 0 || ny >= image.height) continue
+          if (image.data[(ny * image.width + nx) * 4 + 3] !== 0) { hit = true; break }
+        }
+      }
+      if (hit) { result.data[target] = rgba[0]; result.data[target + 1] = rgba[1]; result.data[target + 2] = rgba[2]; result.data[target + 3] = rgba[3] }
+    }
+  }
+  return result
+}
+
+function promptTemplate(template, image, blueprint) {
+  return text(template, '请保持像素画风格，对这张局部图像做局部优化。', 2400)
+    .replace(/\{\{width\}\}/g, String(image.width))
+    .replace(/\{\{height\}\}/g, String(image.height))
+    .replace(/\{\{blueprint\}\}/g, blueprint.name)
+}
+
+function executeBlueprint(blueprint, initialImage) {
+  const normalized = normalizeBlueprint(blueprint)
+  if (!normalized) return { ok: false, error: '蓝图格式无效' }
+  const nodes = normalized.nodes
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  const incoming = new Map(nodes.map((node) => [node.id, []]))
+  for (const edge of normalized.edges) if (incoming.has(edge.to) && byId.has(edge.from)) incoming.get(edge.to).push(edge.from)
+  const values = new Map()
+  const remaining = new Set(nodes.map((node) => node.id))
+  let output = null
+  for (let pass = 0; pass < nodes.length + 2 && remaining.size > 0; pass++) {
+    let progressed = false
+    for (const node of nodes) {
+      if (!remaining.has(node.id)) continue
+      const parents = incoming.get(node.id) || []
+      if (parents.some((parent) => !values.has(parent))) continue
+      const input = parents.length > 0 ? values.get(parents[0]) : initialImage
+      if (!input) return { ok: false, error: '节点 ' + node.label + ' 没有输入图像' }
+      let value = input
+      if (node.type === 'crop') value = cropTransparent(input, node.params.padding)
+      else if (node.type === 'outline') value = outlineImage(input, node.params.thickness, node.params.color)
+      else if (node.type === 'llm') return { ok: true, kind: 'active', image: input, node, prompt: promptTemplate(node.params.prompt, input, normalized), values }
+      else if (node.type === 'output') output = input
+      values.set(node.id, value)
+      remaining.delete(node.id)
+      progressed = true
+    }
+    if (!progressed) break
+  }
+  if (remaining.size > 0) return { ok: false, error: '蓝图连线存在循环或断开的节点' }
+  return { ok: true, kind: 'passive', image: output || values.get(nodes[nodes.length - 1].id) || initialImage, values }
+}
+
+function imageFromDocument(doc, frameIdx, selection) {
+  const x = selection ? selection.x : 0
+  const y = selection ? selection.y : 0
+  const width = selection ? selection.w : doc.width
+  const height = selection ? selection.h : doc.height
+  const buf = compositeFrame(doc, frameIdx, new Uint8ClampedArray(doc.width * doc.height * 4))
+  return cropImage({ width: doc.width, height: doc.height, data: buf }, x, y, width, height)
+}
+
+function imageToPng(image, scale = 8) {
+  const factor = Math.max(1, Math.floor(number(scale, 8)))
+  const canvas = document.createElement('canvas')
+  canvas.width = image.width
+  canvas.height = image.height
+  const ctx = canvas.getContext('2d')
+  ctx.imageSmoothingEnabled = false
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(image.data), image.width, image.height), 0, 0)
+  if (factor === 1) return canvas.toDataURL('image/png')
+  const scaled = document.createElement('canvas')
+  scaled.width = image.width * factor; scaled.height = image.height * factor
+  const scaledCtx = scaled.getContext('2d')
+  scaledCtx.imageSmoothingEnabled = false
+  scaledCtx.drawImage(canvas, 0, 0, scaled.width, scaled.height)
+  return scaled.toDataURL('image/png')
+}
+
+function writeImageToDocument(doc, frameIdx, layerIdx, image, x = 0, y = 0) {
+  for (let row = 0; row < image.height; row++) {
+    for (let col = 0; col < image.width; col++) {
+      const dx = x + col, dy = y + row
+      if (dx < 0 || dx >= doc.width || dy < 0 || dy >= doc.height) continue
+      const i = (row * image.width + col) * 4
+      setPixel(doc, frameIdx, layerIdx, dx, dy, { r: image.data[i], g: image.data[i + 1], b: image.data[i + 2], a: image.data[i + 3] })
+    }
+  }
+  return doc
+}
+
+function blueprintNodeTitle(type) {
+  return ({ input: '输入选区', crop: '裁剪', outline: '描边', llm: 'LLM', output: '输出' }[type]) || type
+}
+
+
+/**
  * dsh-aseprite client: pixel-art / sprite animation editor panel for the DSH
  * Web UI. Pure client-side: no host services needed. Reads and writes real
  * .aseprite files through the bundled codec; exports PNG frames/sheets.
@@ -944,7 +1331,7 @@ function dataUrlToFile(dataUrl, name) {
   return new File([bytes], name, { type })
 }
 
-function Toolbar({ t, onUndo, onRedo, canUndo, canRedo, onOpen, onSave, onExport, onNew, onAsk, canAsk }) {
+function Toolbar({ t, onUndo, onRedo, canUndo, canRedo, onOpen, onSave, onExport, onNew, onAsk, canAsk, onBlueprints }) {
   const s = useAse()
   return h('div', { className: 'ase-toolbar' },
     h('div', { className: 'ase-tool-group' },
@@ -991,6 +1378,12 @@ function Toolbar({ t, onUndo, onRedo, canUndo, canRedo, onOpen, onSave, onExport
       }, 'ASK'),
       s.selection ? h('span', { className: 'ase-selection-label' }, s.selection.w + '×' + s.selection.h) : null
     ),
+    h('button', {
+      type: 'button',
+      className: 'ase-btn ase-blueprint-trigger',
+      title: t('action.blueprints'),
+      onClick: onBlueprints
+    }, '🧩'),
     h('div', { className: 'ase-tool-group' },
       h('label', { className: 'ase-btn ase-file-btn', title: t('action.open') },
         '📂',
@@ -1471,10 +1864,307 @@ function NewDialog({ t, onClose }) {
   )
 }
 
+
+// ── blueprint workflow UI ───────────────────────────────────────────────────
+function blueprintNodePosition(node, index) {
+  return node.position || { x: 24 + index * 190, y: 36 + (index % 2) * 88 }
+}
+
+function blueprintColorHex(value) {
+  const rgba = Array.isArray(value) ? value : [0, 0, 0, 255]
+  return '#' + [0, 1, 2].map((index) => Math.max(0, Math.min(255, Math.round(Number(rgba[index]) || 0))).toString(16).padStart(2, '0')).join('')
+}
+
+function BlueprintNodeControls({ node, onPatch }) {
+  const stop = (e) => e.stopPropagation()
+  if (node.type === 'crop') return h('label', { className: 'ase-bp-control', onPointerDown: stop },
+    '留白',
+    h('input', { type: 'number', min: 0, max: 64, value: node.params.padding, onChange: (e) => onPatch({ padding: Math.max(0, Math.min(64, Number(e.target.value) || 0)) }) })
+  )
+  if (node.type === 'outline') return h('div', { className: 'ase-bp-control-row', onPointerDown: stop },
+    h('label', { className: 'ase-bp-control' }, '厚度', h('input', { type: 'number', min: 1, max: 16, value: node.params.thickness, onChange: (e) => onPatch({ thickness: Math.max(1, Math.min(16, Number(e.target.value) || 1)) }) })),
+    h('input', { type: 'color', value: blueprintColorHex(node.params.color), title: '描边颜色', onChange: (e) => { const n = parseInt(e.target.value.slice(1), 16); onPatch({ color: [(n >> 16) & 255, (n >> 8) & 255, n & 255, 255] }) } })
+  )
+  if (node.type === 'llm') return h('textarea', { className: 'ase-bp-prompt', value: node.params.prompt, rows: 2, onPointerDown: stop, onChange: (e) => onPatch({ prompt: e.target.value }) })
+  return null
+}
+
+function BlueprintGraph({ blueprint, onChange }) {
+  const [positions, setPositions] = React.useState(() => Object.fromEntries(blueprint.nodes.map((node, index) => [node.id, blueprintNodePosition(node, index)])))
+  const drag = React.useRef(null)
+  const port = React.useRef(null)
+  const [portHint, setPortHint] = React.useState('')
+
+  React.useEffect(() => {
+    setPositions(Object.fromEntries(blueprint.nodes.map((node, index) => [node.id, blueprintNodePosition(node, index)])))
+    port.current = null
+    setPortHint('')
+  }, [blueprint.id])
+
+  const endDrag = () => {
+    const active = drag.current
+    if (!active) return
+    drag.current = null
+    window.removeEventListener('pointermove', moveDrag)
+    window.removeEventListener('pointerup', endDrag)
+    const position = active.position
+    if (!position) return
+    onChange({
+      ...blueprint,
+      nodes: blueprint.nodes.map((node) => node.id === active.id ? { ...node, position } : node)
+    })
+  }
+
+  const moveDrag = (e) => {
+    const active = drag.current
+    if (!active) return
+    e.preventDefault()
+    active.position = {
+      x: Math.max(12, active.start.x + e.clientX - active.x),
+      y: Math.max(12, active.start.y + e.clientY - active.y)
+    }
+    setPositions((previous) => ({ ...previous, [active.id]: active.position }))
+  }
+
+  const beginDrag = (e, node) => {
+    if (e.target?.closest?.('button')) return
+    e.preventDefault()
+    const position = positions[node.id] || blueprintNodePosition(node, 0)
+    drag.current = { id: node.id, x: e.clientX, y: e.clientY, start: position, position }
+    window.addEventListener('pointermove', moveDrag, { passive: false })
+    window.addEventListener('pointerup', endDrag)
+  }
+
+  const choosePort = (nodeId, side) => {
+    const chosen = port.current
+    if (!chosen) {
+      port.current = { nodeId, side }
+      setPortHint(side === 'out' ? '已选择输出端口，请点击另一个节点的输入端口。' : '已选择输入端口，请点击另一个节点的输出端口。')
+      return
+    }
+    if (chosen.nodeId === nodeId || chosen.side === side) {
+      port.current = null
+      setPortHint('')
+      return
+    }
+    const from = chosen.side === 'out' ? chosen.nodeId : nodeId
+    const to = chosen.side === 'in' ? chosen.nodeId : nodeId
+    const exists = blueprint.edges.some((edge) => edge.from === from && edge.to === to)
+    port.current = null
+    setPortHint(exists ? '这条连线已经存在。' : '连线已添加。')
+    if (!exists) onChange({ ...blueprint, edges: [...blueprint.edges, { from, to }] })
+  }
+
+  React.useEffect(() => () => {
+    window.removeEventListener('pointermove', moveDrag)
+    window.removeEventListener('pointerup', endDrag)
+  }, [])
+
+  const maxX = Math.max(760, ...blueprint.nodes.map((node, index) => (positions[node.id] || blueprintNodePosition(node, index)).x + 190))
+  const maxY = Math.max(280, ...blueprint.nodes.map((node, index) => (positions[node.id] || blueprintNodePosition(node, index)).y + 112))
+  const byId = new Map(blueprint.nodes.map((node) => [node.id, node]))
+  return h('div', { className: 'ase-bp-graph-wrap' },
+    h('div', { className: 'ase-bp-graph-hint' }, portHint || '拖动节点标题移动；点击输出端口，再点击输入端口创建连线。'),
+    h('div', { className: 'ase-bp-graph', style: { width: maxX, height: maxY } },
+      h('svg', { className: 'ase-bp-edges', width: maxX, height: maxY, viewBox: '0 0 ' + maxX + ' ' + maxY },
+        blueprint.edges.map((edge, index) => {
+          const fromNode = byId.get(edge.from), toNode = byId.get(edge.to)
+          if (!fromNode || !toNode) return null
+          const from = positions[fromNode.id] || blueprintNodePosition(fromNode, 0)
+          const to = positions[toNode.id] || blueprintNodePosition(toNode, 0)
+          const x1 = from.x + 172, y1 = from.y + 48, x2 = to.x + 8, y2 = to.y + 48
+          return h('path', { key: index, d: 'M ' + x1 + ' ' + y1 + ' C ' + (x1 + 48) + ' ' + y1 + ' ' + (x2 - 48) + ' ' + y2 + ' ' + x2 + ' ' + y2, className: 'ase-bp-edge' })
+        })
+      ),
+      blueprint.nodes.map((node, index) => {
+        const position = positions[node.id] || blueprintNodePosition(node, index)
+        return h('div', {
+          key: node.id,
+          className: 'ase-bp-node ase-bp-node-' + node.mode,
+          style: { left: position.x, top: position.y },
+          onPointerDown: (e) => beginDrag(e, node)
+        },
+          h('button', { type: 'button', className: 'ase-bp-port ase-bp-port-in', title: '输入端口', onClick: (e) => { e.stopPropagation(); choosePort(node.id, 'in') } }, '◀'),
+          h('div', { className: 'ase-bp-node-head' },
+            h('span', { className: 'ase-bp-node-type' }, node.mode === 'active' ? '主动' : '被动'),
+            h('strong', {}, node.label || blueprintNodeTitle(node.type))
+          ),
+          h('div', { className: 'ase-bp-node-body' },
+            h('div', { className: 'ase-bp-node-summary' }, node.type === 'llm' ? node.params.prompt : blueprintNodeTitle(node.type)),
+            h(BlueprintNodeControls, { node, onPatch: (patch) => onChange({ ...blueprint, nodes: blueprint.nodes.map((item) => item.id === node.id ? { ...item, params: { ...item.params, ...patch } } : item) }) })
+          ),
+          h('button', { type: 'button', className: 'ase-bp-port ase-bp-port-out', title: '输出端口', onClick: (e) => { e.stopPropagation(); choosePort(node.id, 'out') } }, '▶')
+        )
+      })
+    )
+  )
+}
+
+function BlueprintCreateDialog({ t, onClose, onSubmit }) {
+  const [task, setTask] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [error, setError] = React.useState('')
+  const submit = async () => {
+    if (!task.trim()) return
+    setBusy(true)
+    setError('')
+    try {
+      await onSubmit(task.trim())
+      onClose()
+    } catch (err) {
+      setError(String(err?.message || err))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return h('div', { className: 'ase-bp-create-overlay' },
+    h('div', { className: 'ase-modal-box ase-bp-create-box' },
+      h('div', { className: 'ase-modal-title' }, 'AI 创建蓝图'),
+      h('div', { className: 'ase-ask-hint' }, '描述一项完整的像素处理任务，AI 会生成节点、参数和连线，并自动保存到蓝图库。'),
+      h('textarea', {
+        className: 'ase-ask-textarea',
+        value: task,
+        autoFocus: true,
+        placeholder: '例如：先裁剪透明边界，再用深色像素描边；不要调用 AI。',
+        onChange: (e) => setTask(e.target.value),
+        onKeyDown: (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') void submit() }
+      }),
+      error ? h('div', { className: 'ase-ask-error' }, error) : null,
+      h('div', { className: 'ase-modal-actions' },
+        h('button', { type: 'button', className: 'ase-btn', disabled: busy, onClick: onClose }, t('action.cancel')),
+        h('button', { type: 'button', className: 'ase-btn ase-btn-primary', disabled: busy || !task.trim(), onClick: () => void submit() }, busy ? '…' : '发送给 AI')
+      )
+    )
+  )
+}
+
+function BlueprintPanel({ t, onClose, onAskCreate, onRun, notice }) {
+  const library = useBlueprints()
+  const [selectedId, setSelectedId] = React.useState(library.list[0]?.id || '')
+  const [createOpen, setCreateOpen] = React.useState(false)
+  const [status, setStatus] = React.useState('')
+  const fileRef = React.useRef(null)
+  React.useEffect(() => {
+    if (!library.list.some((item) => item.id === selectedId)) setSelectedId(library.list[0]?.id || '')
+  }, [library.revision, selectedId])
+  const selected = library.list.find((item) => item.id === selectedId) || library.list[0]
+  const update = (next) => {
+    try {
+      const saved = upsertBlueprint(next)
+      setSelectedId(saved.id)
+      return saved
+    } catch (err) {
+      setStatus(String(err?.message || err))
+      return null
+    }
+  }
+  const run = async () => {
+    if (!selected) return
+    setStatus('')
+    try {
+      await onRun(selected)
+      setStatus(selected.mode === 'active' ? '已发送到当前会话 AI。' : '被动蓝图已应用。')
+    } catch (err) {
+      setStatus(String(err?.message || err))
+    }
+  }
+  const exportLibrary = () => downloadBlob(new Blob([exportBlueprintText()], { type: 'application/json' }), 'dsh-blueprints.json')
+  const importLibrary = async (file) => {
+    try {
+      const imported = importBlueprintText(await file.text())
+      setSelectedId(imported[0].id)
+      setStatus('已自动导入 ' + imported.length + ' 个蓝图。')
+    } catch (err) {
+      setStatus('导入失败：' + String(err?.message || err))
+    }
+  }
+  const deleteSelected = () => {
+    if (!selected) return
+    removeBlueprint(selected.id)
+    setStatus('已删除蓝图。')
+  }
+  return h('div', { className: 'ase-modal ase-blueprint-modal' },
+    h('div', { className: 'ase-modal-box ase-blueprint-box' },
+      h('div', { className: 'ase-blueprint-head' },
+        h('div', {}, h('strong', {}, '蓝图工作流'), h('span', { className: 'ase-bp-subtitle' }, ' · ComfyUI 风格节点复用')),
+        h('div', { className: 'ase-tool-group' },
+          h('button', { type: 'button', className: 'ase-btn ase-mini', title: t('action.blueprintCreate'), onClick: () => setCreateOpen(true) }, '✨ AI 创建'),
+          h('button', { type: 'button', className: 'ase-btn ase-mini', title: '导出蓝图库', onClick: exportLibrary }, '⇩'),
+          h('label', { className: 'ase-btn ase-mini', title: '导入蓝图库' }, '⇧', h('input', { ref: fileRef, type: 'file', accept: '.json,application/json', style: { display: 'none' }, onChange: (e) => { const file = e.target.files?.[0]; if (file) void importLibrary(file); e.target.value = '' } })),
+          h('button', { type: 'button', className: 'ase-btn ase-mini', onClick: onClose }, '✕')
+        )
+      ),
+      h('div', { className: 'ase-blueprint-layout' },
+        h('div', { className: 'ase-bp-library' },
+          h('div', { className: 'ase-panel-head' }, '我的蓝图', h('span', { className: 'ase-bp-count' }, String(library.list.length))),
+          h('div', { className: 'ase-bp-library-list' }, library.list.map((item) =>
+            h('button', { key: item.id, type: 'button', className: 'ase-bp-library-item' + (item.id === selected?.id ? ' ase-active' : ''), onClick: () => setSelectedId(item.id) },
+              h('span', { className: 'ase-bp-library-mode ase-bp-library-mode-' + item.mode }, item.mode === 'active' ? '主动' : '被动'),
+              h('strong', {}, item.name),
+              h('small', {}, item.description)
+            )
+          ))
+        ),
+        h('div', { className: 'ase-bp-workbench' }, selected
+          ? h(React.Fragment, {},
+              h('div', { className: 'ase-bp-workbench-head' },
+                h('div', {}, h('strong', {}, selected.name), h('div', { className: 'ase-bp-description' }, selected.description)),
+                h('div', { className: 'ase-tool-group' },
+                  h('button', { type: 'button', className: 'ase-btn ase-btn-primary', onClick: () => void run() }, selected.mode === 'active' ? '运行并询问 AI' : '运行蓝图'),
+                  h('button', { type: 'button', className: 'ase-btn ase-danger', onClick: deleteSelected }, '删除')
+                )
+              ),
+              h(BlueprintGraph, { blueprint: selected, onChange: update }),
+              h('div', { className: 'ase-bp-footer' }, notice || status || (selected.mode === 'active' ? '主动蓝图会把图像交给当前会话 LLM。' : '被动蓝图完全在浏览器本地运行，不调用 LLM。'))
+            )
+          : h('div', { className: 'ase-bp-empty' }, '还没有蓝图，点击“AI 创建”。')
+        )
+      ),
+      createOpen ? h(BlueprintCreateDialog, { t, onClose: () => setCreateOpen(false), onSubmit: onAskCreate }) : null
+    )
+  )
+}
+
+function blueprintAssistantNodes(session) {
+  const collections = [session?.chat?.nodes, session?.nodes]
+  for (const collection of collections) {
+    const values = collection?.values
+    if (typeof values !== 'function') continue
+    try { return Array.from(values.call(collection) || []) } catch (_) {}
+  }
+  return []
+}
+
+function blueprintAssistantKey(node) {
+  return String(node?.messageId || node?.id || '')
+}
+
+function blueprintAssistantSeq(node) {
+  const value = Number(node?.seq)
+  return Number.isFinite(value) ? value : null
+}
+
+function blueprintSessionKey(session) {
+  return String(session?.sessionId || session?.id || session?.key || '')
+}
+
+function blueprintNonce() {
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const values = new Uint32Array(3)
+    crypto.getRandomValues(values)
+    return Array.from(values).map((value) => value.toString(36)).join('-')
+  }
+  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
+}
+
 // ── main panel ──────────────────────────────────────────────────────────────
-function EditorPanel({ t, askSelection }) {
+function EditorPanel({ t, askSelection, submitBlueprint, session }) {
   const s = useAse()
   const [askOpen, setAskOpen] = React.useState(false)
+  const [blueprintOpen, setBlueprintOpen] = React.useState(false)
+  const [blueprintNotice, setBlueprintNotice] = React.useState('')
+  const pendingBlueprint = React.useRef(null)
+  const seenAssistant = React.useRef(new Set())
   const openAsk = () => {
     if (s.selection && typeof askSelection === 'function') setAskOpen(true)
   }
@@ -1491,6 +2181,104 @@ function EditorPanel({ t, askSelection }) {
       '具体要求：' + request
     ].join('\n')
     await askSelection(file, prompt)
+  }
+  const createBlueprint = async (task) => {
+    if (typeof submitBlueprint !== 'function') throw new Error(t('error.noConversation'))
+    const requestId = blueprintNonce()
+    let baselineSeq = -1
+    const baselineIds = new Set()
+    for (const node of blueprintAssistantNodes(session)) {
+      if (node?.kind !== 'assistant') continue
+      const seq = blueprintAssistantSeq(node)
+      if (seq !== null) baselineSeq = Math.max(baselineSeq, seq)
+      const key = blueprintAssistantKey(node)
+      if (key) baselineIds.add(key)
+    }
+    pendingBlueprint.current = {
+      requestId,
+      baselineSeq,
+      baselineIds,
+      sessionKey: blueprintSessionKey(session)
+    }
+    setBlueprintNotice('已发送蓝图设计请求，等待 AI 返回结构化蓝图。')
+    try {
+      await submitBlueprint({ prompt: blueprintPrompt(task, requestId) })
+    } catch (err) {
+      if (pendingBlueprint.current?.requestId === requestId) pendingBlueprint.current = null
+      throw err
+    }
+  }
+  const readAssistantText = (node) => (node?.blocks || []).filter((block) => block.kind === 'text').map((block) => String(block.text || '')).join('\n')
+  React.useEffect(() => {
+    const pending = pendingBlueprint.current
+    if (!pending) return
+    const currentSessionKey = blueprintSessionKey(session)
+    if (pending.sessionKey && currentSessionKey && pending.sessionKey !== currentSessionKey) return
+    for (const node of blueprintAssistantNodes(session)) {
+      if (node?.kind !== 'assistant' || node.interrupted === true || node.partial === true || node.finalized === false || node.status === 'streaming') continue
+      const key = blueprintAssistantKey(node)
+      if (!key || seenAssistant.current.has(key)) continue
+      const seq = blueprintAssistantSeq(node)
+      if (pending.baselineIds.has(key) || (seq !== null && seq <= pending.baselineSeq)) {
+        seenAssistant.current.add(key)
+        continue
+      }
+      const matches = extractBlueprintsFromText(readAssistantText(node)).filter((blueprint) => blueprint.requestId === pending.requestId)
+      if (matches.length === 0) {
+        seenAssistant.current.add(key)
+        continue
+      }
+      seenAssistant.current.add(key)
+      try {
+        for (const blueprint of matches) {
+          const saved = upsertBlueprint(blueprint)
+          setBlueprintNotice('AI 已自动创建蓝图：' + saved.name)
+        }
+        pendingBlueprint.current = null
+      } catch (err) {
+        setBlueprintNotice('蓝图解析失败：' + String(err?.message || err))
+      }
+    }
+  }, [session])
+  const runBlueprint = async (blueprint) => {
+    const selection = snapshot.selection
+    if (!selection) throw new Error('请先在画布上框选一个区域，再运行蓝图。')
+    const initialImage = imageFromDocument(snapshot.doc, snapshot.frame, selection)
+    const result = executeBlueprint(blueprint, initialImage)
+    if (!result.ok) throw new Error(result.error)
+    if (result.kind === 'active') {
+      if (typeof submitBlueprint !== 'function') throw new Error(t('error.noConversation'))
+      const file = dataUrlToFile(imageToPng(result.image, 8), 'blueprint-' + blueprint.id + '-frame-' + snapshot.frame + '.png')
+      const prompt = [
+        '这是一个主动蓝图工作流的输入图像。',
+        '蓝图名称：' + blueprint.name,
+        '节点提示：' + result.prompt,
+        '请只处理附图对应的局部内容，保持像素画风格；不要修改选区外内容。'
+      ].join('\n')
+      await submitBlueprint({ file, prompt })
+      return result
+    }
+    const output = result.image
+    const nextDoc = cloneDoc(snapshot.doc)
+    const history = new History(snapshot.doc)
+    history.snapshot()
+    if (output.width === selection.w && output.height === selection.h) {
+      for (let row = 0; row < selection.h; row++) {
+        for (let col = 0; col < selection.w; col++) setPixel(nextDoc, snapshot.frame, snapshot.layer, selection.x + col, selection.y + row, { r: 0, g: 0, b: 0, a: 0 })
+      }
+      writeImageToDocument(nextDoc, snapshot.frame, snapshot.layer, output, selection.x, selection.y)
+      history.stack[history.index] = cloneDoc(nextDoc)
+      set({ doc: nextDoc, history, selection: { x: selection.x, y: selection.y, w: output.width, h: output.height } })
+      return result
+    }
+    const replacement = newSprite(output.width, output.height, 1, snapshot.doc.frames[snapshot.frame]?.duration || 100, 1)
+    replacement.palette = defaultPalette()
+    writeImageToDocument(replacement, 0, 0, output, 0, 0)
+    const replacementHistory = new History(snapshot.doc)
+    replacementHistory.snapshot()
+    replacementHistory.stack[replacementHistory.index] = cloneDoc(replacement)
+    set({ doc: replacement, history: replacementHistory, frame: 0, layer: 0, selection: null, fileName: blueprint.name + '.aseprite' })
+    return result
   }
   const rootRef = React.useRef(null)
   const bodyRef = React.useRef(null)
@@ -1578,7 +2366,8 @@ function EditorPanel({ t, askSelection }) {
       onSave: saveFile,
       onNew: () => set({ showNew: true }),
       onAsk: openAsk,
-      canAsk: Boolean(s.selection && typeof askSelection === 'function')
+      canAsk: Boolean(s.selection && typeof askSelection === 'function'),
+      onBlueprints: () => setBlueprintOpen(true)
     }),
     s.error !== null
       ? h('div', { className: 'ase-error' },
@@ -1624,6 +2413,9 @@ function EditorPanel({ t, askSelection }) {
     s.showNew ? h(NewDialog, { t, onClose: () => set({ showNew: false }) }) : null,
     askOpen && s.selection
       ? h(AskDialog, { t, selection: s.selection, onClose: () => setAskOpen(false), onSubmit: submitAsk })
+      : null,
+    blueprintOpen
+      ? h(BlueprintPanel, { t, onClose: () => setBlueprintOpen(false), onAskCreate: createBlueprint, onRun: runBlueprint, notice: blueprintNotice })
       : null
   )
 }
@@ -1654,17 +2446,19 @@ function apply(ctx) {
         if (actx === undefined) throw new Error('dsh-aseprite: session scope unavailable')
         const conversation = actx.get('conversation')
         if (conversation === undefined) throw new Error('dsh-aseprite: conversation service unavailable')
-        return {
-          askSelection: (file, prompt) => {
-            const input = conversation.input.for(actx)
-            const attachments = conversation.createDraftImages([file])
-            if (!input.addImages(attachments.map((attachment) => attachment.id))) {
-              conversation.releaseDraftImages(attachments)
-              throw new Error('当前会话暂时不能添加图片附件')
-            }
-            input.setDraft(prompt)
-            input.submit()
+        const submitBlueprint = ({ file, prompt }) => {
+          const input = conversation.input.for(actx)
+          const attachments = file ? conversation.createDraftImages([file]) : []
+          if (attachments.length > 0 && !input.addImages(attachments.map((attachment) => attachment.id))) {
+            conversation.releaseDraftImages(attachments)
+            throw new Error('当前会话暂时不能添加图片附件')
           }
+          input.setDraft(prompt)
+          input.submit()
+        }
+        return {
+          submitBlueprint,
+          askSelection: (file, prompt) => submitBlueprint({ file, prompt })
         }
       }
     }, EditorPanel)
@@ -1689,6 +2483,8 @@ const zh = {
   'action.zoomOut': '缩小',
   'action.brushSize': '笔刷/橡皮大小',
   'action.askSelection': '把选区交给 AI 局部调整',
+  'action.blueprints': '打开蓝图工作流',
+  'action.blueprintCreate': '让 AI 创建蓝图',
   'action.askSend': '发送给 AI',
   'action.open': '打开 .aseprite',
   'action.save': '保存为 .aseprite',
@@ -1740,6 +2536,8 @@ const en = {
   'action.zoomOut': 'Zoom out',
   'action.brushSize': 'Brush / eraser size',
   'action.askSelection': 'Ask AI to adjust selection',
+  'action.blueprints': 'Open blueprint workflows',
+  'action.blueprintCreate': 'Ask AI to create a blueprint',
   'action.askSend': 'Send to AI',
   'action.open': 'Open .aseprite',
   'action.save': 'Save .aseprite',
@@ -2038,6 +2836,60 @@ function ensureStyles() {
   border: 1px solid var(--ase-border); border-radius: 5px; padding: 3px 6px;
 }
 .ase-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ase-blueprint-trigger { border-color: color-mix(in srgb, var(--ase-accent) 55%, var(--ase-border)); }
+.ase-mini { padding: 2px 6px; font-size: 12px; }
+.ase-danger { color: var(--ase-danger); }
+.ase-blueprint-box {
+  width: min(1040px, calc(100% - 24px)); height: min(92%, 680px); min-height: 420px;
+  max-width: none; overflow: hidden;
+}
+.ase-blueprint-head, .ase-bp-workbench-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.ase-bp-subtitle, .ase-bp-description { color: var(--ase-text-dim); font-size: 12px; font-weight: 400; }
+.ase-blueprint-layout { display: grid; grid-template-columns: 218px minmax(0, 1fr); gap: 10px; min-height: 0; flex: 1; }
+.ase-bp-library { min-width: 0; min-height: 0; border: 1px solid var(--ase-border); border-radius: 7px; overflow: hidden; display: flex; flex-direction: column; }
+.ase-bp-library-list { min-height: 0; overflow: auto; padding: 5px; display: flex; flex-direction: column; gap: 4px; }
+.ase-bp-library-item { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; padding: 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--ase-text); text-align: left; cursor: pointer; }
+.ase-bp-library-item:hover, .ase-bp-library-item.ase-active { border-color: var(--ase-accent); background: color-mix(in srgb, var(--ase-accent) 10%, transparent); }
+.ase-bp-library-item strong { font-size: 12px; }
+.ase-bp-library-item small { color: var(--ase-text-dim); font-size: 11px; line-height: 1.35; }
+.ase-bp-library-mode { font-size: 10px; padding: 1px 4px; border-radius: 3px; background: color-mix(in srgb, var(--ase-text-dim) 18%, transparent); }
+.ase-bp-library-mode-active { color: #ffb86b; }
+.ase-bp-library-mode-passive { color: #7dd3fc; }
+.ase-bp-count { float: right; color: var(--ase-text-dim); font-size: 11px; }
+.ase-bp-workbench { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.ase-bp-workbench-head { flex: none; }
+.ase-bp-workbench-head strong { font-size: 14px; }
+.ase-bp-graph-wrap { min-height: 0; flex: 1; overflow: auto; border: 1px solid var(--ase-border); border-radius: 7px; background: color-mix(in srgb, var(--ase-bg) 88%, #000 12%); }
+.ase-bp-graph-hint { position: sticky; top: 0; z-index: 3; padding: 5px 8px; color: var(--ase-text-dim); font-size: 11px; background: color-mix(in srgb, var(--ase-bg) 88%, transparent); border-bottom: 1px solid var(--ase-border); }
+.ase-bp-graph { position: relative; min-width: 760px; min-height: 280px; }
+.ase-bp-edges { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+.ase-bp-edge { fill: none; stroke: color-mix(in srgb, var(--ase-accent) 70%, transparent); stroke-width: 2; }
+.ase-bp-node { position: absolute; width: 180px; min-height: 88px; border: 1px solid var(--ase-border); border-radius: 7px; background: var(--ase-bg); box-shadow: 0 4px 12px rgba(0,0,0,.24); cursor: grab; user-select: none; z-index: 2; }
+.ase-bp-node:active { cursor: grabbing; }
+.ase-bp-node-active { border-color: color-mix(in srgb, #ffb86b 65%, var(--ase-border)); }
+.ase-bp-node-passive { border-color: color-mix(in srgb, #7dd3fc 55%, var(--ase-border)); }
+.ase-bp-node-head { display: flex; align-items: center; gap: 5px; padding: 7px 10px; border-bottom: 1px solid var(--ase-border); }
+.ase-bp-node-type { font-size: 10px; color: var(--ase-text-dim); }
+.ase-bp-node-body { padding: 7px 10px; color: var(--ase-text-dim); font-size: 11px; line-height: 1.35; max-height: 92px; overflow: hidden; }
+.ase-bp-node-summary { max-height: 32px; overflow: hidden; margin-bottom: 5px; }
+.ase-bp-control-row { display: flex; align-items: center; gap: 5px; }
+.ase-bp-control { display: inline-flex; align-items: center; gap: 4px; color: var(--ase-text-dim); font-size: 10px; }
+.ase-bp-control input[type=number] { width: 38px; padding: 1px 3px; color: var(--ase-text); background: transparent; border: 1px solid var(--ase-border); border-radius: 3px; font-size: 10px; }
+.ase-bp-control-row input[type=color] { width: 26px; height: 20px; padding: 0; border: 1px solid var(--ase-border); background: transparent; }
+.ase-bp-prompt { width: 100%; resize: vertical; min-height: 30px; padding: 3px; color: var(--ase-text); background: transparent; border: 1px solid var(--ase-border); border-radius: 3px; font: 10px/1.3 inherit; }
+.ase-bp-port { position: absolute; z-index: 4; width: 17px; height: 17px; padding: 0; border: 1px solid var(--ase-border); border-radius: 50%; background: var(--ase-bg); color: var(--ase-text-dim); font-size: 9px; line-height: 14px; cursor: crosshair; }
+.ase-bp-port:hover { color: var(--ase-accent); border-color: var(--ase-accent); }
+.ase-bp-port-in { left: -9px; top: 40px; }
+.ase-bp-port-out { right: -9px; top: 40px; }
+.ase-bp-footer { flex: none; color: var(--ase-text-dim); font-size: 11px; min-height: 18px; }
+.ase-bp-empty { display: grid; place-items: center; min-height: 240px; color: var(--ase-text-dim); }
+.ase-bp-create-overlay { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.32); }
+.ase-bp-create-box { width: min(520px, calc(100% - 24px)); }
+@media (max-width: 760px) {
+  .ase-blueprint-box { min-height: 360px; }
+  .ase-blueprint-layout { grid-template-columns: 156px minmax(0, 1fr); }
+  .ase-bp-library-item { padding: 6px; }
+}
 `
   document.head.appendChild(style)
 }
