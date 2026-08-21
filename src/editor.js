@@ -359,6 +359,33 @@ export function frameToPng(doc, frameIdx, scale = 1) {
   return canvas.toDataURL('image/png')
 }
 
+/** Return a scaled PNG data URL for a rectangular composite region. */
+export function regionToPng(doc, frameIdx, x, y, width, height, scale = 8) {
+  const sx = Math.max(0, Math.min(doc.width - 1, Math.floor(x)))
+  const sy = Math.max(0, Math.min(doc.height - 1, Math.floor(y)))
+  const sw = Math.max(1, Math.min(doc.width - sx, Math.floor(width)))
+  const sh = Math.max(1, Math.min(doc.height - sy, Math.floor(height)))
+  const factor = Math.max(1, Math.floor(scale) || 1)
+  const source = document.createElement('canvas')
+  source.width = sw
+  source.height = sh
+  const sourceCtx = source.getContext('2d')
+  const buf = compositeFrame(doc, frameIdx, new Uint8ClampedArray(doc.width * doc.height * 4))
+  const crop = new Uint8ClampedArray(sw * sh * 4)
+  for (let row = 0; row < sh; row++) {
+    const from = ((sy + row) * doc.width + sx) * 4
+    crop.set(buf.subarray(from, from + sw * 4), row * sw * 4)
+  }
+  sourceCtx.putImageData(new ImageData(crop, sw, sh), 0, 0)
+  const canvas = document.createElement('canvas')
+  canvas.width = sw * factor
+  canvas.height = sh * factor
+  const ctx = canvas.getContext('2d')
+  ctx.imageSmoothingEnabled = false
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height)
+  return canvas.toDataURL('image/png')
+}
+
 /** Return a PNG sprite-sheet data URL: frames laid out horizontally. */
 export function sheetToPng(doc, scale = 1) {
   const fw = doc.width, fh = doc.height

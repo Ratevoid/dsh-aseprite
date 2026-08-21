@@ -700,6 +700,33 @@ function frameToPng(doc, frameIdx, scale = 1) {
   return canvas.toDataURL('image/png')
 }
 
+/** Return a scaled PNG data URL for a rectangular composite region. */
+function regionToPng(doc, frameIdx, x, y, width, height, scale = 8) {
+  const sx = Math.max(0, Math.min(doc.width - 1, Math.floor(x)))
+  const sy = Math.max(0, Math.min(doc.height - 1, Math.floor(y)))
+  const sw = Math.max(1, Math.min(doc.width - sx, Math.floor(width)))
+  const sh = Math.max(1, Math.min(doc.height - sy, Math.floor(height)))
+  const factor = Math.max(1, Math.floor(scale) || 1)
+  const source = document.createElement('canvas')
+  source.width = sw
+  source.height = sh
+  const sourceCtx = source.getContext('2d')
+  const buf = compositeFrame(doc, frameIdx, new Uint8ClampedArray(doc.width * doc.height * 4))
+  const crop = new Uint8ClampedArray(sw * sh * 4)
+  for (let row = 0; row < sh; row++) {
+    const from = ((sy + row) * doc.width + sx) * 4
+    crop.set(buf.subarray(from, from + sw * 4), row * sw * 4)
+  }
+  sourceCtx.putImageData(new ImageData(crop, sw, sh), 0, 0)
+  const canvas = document.createElement('canvas')
+  canvas.width = sw * factor
+  canvas.height = sh * factor
+  const ctx = canvas.getContext('2d')
+  ctx.imageSmoothingEnabled = false
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height)
+  return canvas.toDataURL('image/png')
+}
+
 /** Return a PNG sprite-sheet data URL: frames laid out horizontally. */
 function sheetToPng(doc, scale = 1) {
   const fw = doc.width, fh = doc.height
@@ -733,7 +760,7 @@ function sheetToPng(doc, scale = 1) {
 const NS = 'aseprite'
 
 const name = 'dsh-aseprite'
-const inject = ['slots', 'locale']
+const inject = ['slots', 'locale', 'sessions', 'conversation']
 
 // ── tiny hyperscript helper ─────────────────────────────────────────────────
 const h = React.createElement
@@ -775,6 +802,7 @@ function makeInitial() {
     leftRatio: 0.18,
     rightRatio: 0.20,
     panelHeight: null,
+    selection: null,
     playing: false,
     onion: false,
     showNew: false,
@@ -837,7 +865,7 @@ async function openFile(file) {
       doc.cels.set(key, { x: 0, y: 0, w: doc.width, h: doc.height, data: full })
     }
     const history = new History(doc)
-    set({ doc, history, frame: 0, layer: 0, error: null, fileName: file.name || 'sprite.aseprite', playing: false })
+    set({ doc, history, frame: 0, layer: 0, selection: null, error: null, fileName: file.name || 'sprite.aseprite', playing: false })
   } catch (err) {
     set({ error: (err instanceof ASEError ? err.message : String(err?.message ?? err)) })
   }
@@ -882,7 +910,7 @@ function HeaderAction() {
 
 // ── toolbar ─────────────────────────────────────────────────────────────────
 const TOOLS = [
-  ['pencil', '✏️'], ['eraser', '◻️'], ['fill', '🪣'], ['picker', '💉'], ['line', '📏'], ['rect', '▭']
+  ['pencil', '✏️'], ['eraser', '◻️'], ['fill', '🪣'], ['picker', '💉'], ['line', '📏'], ['rect', '▭'], ['select', '▧']
 ]
 const ZOOM_STEPS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]
 function zoomStep(value, direction) {
@@ -898,8 +926,25 @@ function clampBrushSize(value) {
 function clampNumber(value, min, max) {
   return Math.max(min, Math.min(max, value))
 }
+function selectionFromPoints(x0, y0, x1, y1, width, height) {
+  const left = Math.max(0, Math.min(width - 1, Math.min(x0, x1)))
+  const top = Math.max(0, Math.min(height - 1, Math.min(y0, y1)))
+  const right = Math.max(left, Math.min(width - 1, Math.max(x0, x1)))
+  const bottom = Math.max(top, Math.min(height - 1, Math.max(y0, y1)))
+  return { x: left, y: top, w: right - left + 1, h: bottom - top + 1 }
+}
+function dataUrlToFile(dataUrl, name) {
+  const split = dataUrl.indexOf(',')
+  const header = split >= 0 ? dataUrl.slice(0, split) : ''
+  const payload = split >= 0 ? dataUrl.slice(split + 1) : dataUrl
+  const binary = atob(payload)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  const type = (header.match(/data:([^;]+)/) || [])[1] || 'image/png'
+  return new File([bytes], name, { type })
+}
 
-function Toolbar({ t, onUndo, onRedo, canUndo, canRedo, onOpen, onSave, onExport, onNew }) {
+function Toolbar({ t, onUndo, onRedo, canUndo, canRedo, onOpen, onSave, onExport, onNew, onAsk, canAsk }) {
   const s = useAse()
   return h('div', { className: 'ase-toolbar' },
     h('div', { className: 'ase-tool-group' },
@@ -935,6 +980,16 @@ function Toolbar({ t, onUndo, onRedo, canUndo, canRedo, onOpen, onSave, onExport
         onChange: (e) => set({ brushSize: clampBrushSize(e.target.value) })
       }),
       h('span', { className: 'ase-brush-unit' }, 'px')
+    ),
+    h('div', { className: 'ase-tool-group ase-ask-group' },
+      h('button', {
+        type: 'button',
+        className: 'ase-btn ase-ask',
+        title: t('action.askSelection'),
+        disabled: !canAsk,
+        onClick: onAsk
+      }, 'ASK'),
+      s.selection ? h('span', { className: 'ase-selection-label' }, s.selection.w + '×' + s.selection.h) : null
     ),
     h('div', { className: 'ase-tool-group' },
       h('label', { className: 'ase-btn ase-file-btn', title: t('action.open') },
@@ -987,10 +1042,32 @@ function CanvasView({ t }) {
 
   const pixelAt = (e) => {
     const rect = canvasRef.current.getBoundingClientRect()
-    const x = Math.floor((e.clientX - rect.left) / rect.width * s.doc.width)
-    const y = Math.floor((e.clientY - rect.top) / rect.height * s.doc.height)
+    const x = Math.max(0, Math.min(s.doc.width - 1, Math.floor((e.clientX - rect.left) / rect.width * s.doc.width)))
+    const y = Math.max(0, Math.min(s.doc.height - 1, Math.floor((e.clientY - rect.top) / rect.height * s.doc.height)))
     return [x, y]
   }
+
+  const drawSelectionOverlay = (selection) => {
+    const ov = overlayRef.current
+    if (!ov) return
+    const ctx = ov.getContext('2d')
+    const w = s.doc.width, h = s.doc.height
+    if (ov.width !== w) ov.width = w
+    if (ov.height !== h) ov.height = h
+    ctx.clearRect(0, 0, w, h)
+    if (!selection) return
+    ctx.fillStyle = 'rgba(77,159,255,.16)'
+    ctx.fillRect(selection.x, selection.y, selection.w, selection.h)
+    ctx.strokeStyle = 'rgba(77,159,255,.95)'
+    ctx.lineWidth = 1
+    ctx.setLineDash([1, 1])
+    ctx.strokeRect(selection.x + 0.5, selection.y + 0.5, selection.w, selection.h)
+    ctx.setLineDash([])
+  }
+
+  React.useEffect(() => {
+    if (!drag.current) drawSelectionOverlay(s.selection)
+  }, [s.selection, s.doc.width, s.doc.height])
 
   const begin = (e) => {
     e.preventDefault()
@@ -1003,6 +1080,19 @@ function CanvasView({ t }) {
     }
     if (s.tool === 'fill') {
       commit((d) => floodFill(d, s.frame, s.layer, x, y, color))
+      return
+    }
+    if (s.tool === 'select') {
+      set({ selection: null })
+      drag.current = {
+        startX: x, startY: y, curX: x, curY: y,
+        selecting: true, pointerId: e.pointerId, raf: 0
+      }
+      try { e.currentTarget.setPointerCapture(e.pointerId) } catch (_) {}
+      drawPreview(drag.current)
+      window.addEventListener('pointermove', move, { passive: false })
+      window.addEventListener('pointerup', end)
+      window.addEventListener('pointercancel', end)
       return
     }
     // Clone and snapshot once; movement stays off the React render path.
@@ -1031,6 +1121,16 @@ function CanvasView({ t }) {
     e.preventDefault()
     const coalesced = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : []
     const samples = coalesced.length > 0 ? coalesced : [e]
+    if (s.tool === 'select') {
+      const sample = samples[samples.length - 1]
+      const [x, y] = pixelAt(sample)
+      if (x !== d.curX || y !== d.curY) {
+        d.curX = x
+        d.curY = y
+        drawPreview(d)
+      }
+      return
+    }
     let moved = false
     const color = s.tool === 'eraser' ? { r: 0, g: 0, b: 0, a: 0 } : s.color
     for (const sample of samples) {
@@ -1073,6 +1173,12 @@ function CanvasView({ t }) {
     try {
       if (canvasRef.current?.hasPointerCapture?.(d.pointerId)) canvasRef.current.releasePointerCapture(d.pointerId)
     } catch (_) {}
+    if (s.tool === 'select') {
+      const selection = selectionFromPoints(d.startX, d.startY, d.curX, d.curY, s.doc.width, s.doc.height)
+      set({ selection })
+      drawSelectionOverlay(selection)
+      return
+    }
     if (s.tool === 'pencil' || s.tool === 'eraser') {
       renderCanvasDocument(canvasRef.current, d.working, s.frame, s.onion)
       set({ doc: d.working })
@@ -1094,6 +1200,17 @@ function CanvasView({ t }) {
     if (ov.width !== w) ov.width = w
     if (ov.height !== h) ov.height = h
     ctx.clearRect(0, 0, w, h)
+    if (d.selecting || s.tool === 'select') {
+      const selection = selectionFromPoints(d.startX, d.startY, d.curX, d.curY, w, h)
+      ctx.fillStyle = 'rgba(77,159,255,.16)'
+      ctx.fillRect(selection.x, selection.y, selection.w, selection.h)
+      ctx.strokeStyle = 'rgba(77,159,255,.95)'
+      ctx.lineWidth = 1
+      ctx.setLineDash([1, 1])
+      ctx.strokeRect(selection.x + 0.5, selection.y + 0.5, selection.w, selection.h)
+      ctx.setLineDash([])
+      return
+    }
     const c = s.color
     ctx.fillStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + c.a / 255 + ')'
     ctx.strokeStyle = ctx.fillStyle
@@ -1111,10 +1228,7 @@ function CanvasView({ t }) {
     }
   }
 
-  const clearPreview = () => {
-    const ov = overlayRef.current
-    if (ov) ov.getContext('2d').clearRect(0, 0, ov.width, ov.height)
-  }
+  const clearPreview = () => drawSelectionOverlay(s.selection)
 
   React.useEffect(() => () => {
     window.removeEventListener('pointermove', move)
@@ -1287,6 +1401,49 @@ function PalettePanel({ t }) {
   )
 }
 
+// ── selection ASK dialog ─────────────────────────────────────────────────────
+function AskDialog({ t, selection, onClose, onSubmit }) {
+  const [prompt, setPrompt] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [error, setError] = React.useState(null)
+  const submit = async () => {
+    const value = prompt.trim()
+    if (!value || busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await onSubmit(value)
+      onClose()
+    } catch (err) {
+      setError(String(err?.message ?? err))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return h('div', { className: 'ase-modal' },
+    h('div', { className: 'ase-modal-box ase-ask-box' },
+      h('div', { className: 'ase-modal-title' }, t('dialog.ask')),
+      h('div', { className: 'ase-ask-hint' }, t('dialog.askHint')),
+      h('div', { className: 'ase-ask-selection' }, t('dialog.selection') + ': ' + selection.w + '×' + selection.h + ' @ (' + selection.x + ',' + selection.y + ')'),
+      h('textarea', {
+        className: 'ase-ask-textarea',
+        value: prompt,
+        autoFocus: true,
+        placeholder: t('dialog.askPlaceholder'),
+        onChange: (e) => setPrompt(e.target.value),
+        onKeyDown: (e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') void submit()
+        }
+      }),
+      error ? h('div', { className: 'ase-ask-error' }, error) : null,
+      h('div', { className: 'ase-modal-actions' },
+        h('button', { type: 'button', className: 'ase-btn', disabled: busy, onClick: onClose }, t('action.cancel')),
+        h('button', { type: 'button', className: 'ase-btn ase-btn-primary', disabled: busy || !prompt.trim(), onClick: () => void submit() }, busy ? '…' : t('action.askSend'))
+      )
+    )
+  )
+}
+
 // ── new-document dialog ─────────────────────────────────────────────────────
 function NewDialog({ t, onClose }) {
   const [w, setW] = React.useState(32)
@@ -1297,7 +1454,7 @@ function NewDialog({ t, onClose }) {
     const doc = newSprite(Math.max(1, w | 0), Math.max(1, hh | 0), Math.max(1, frames | 0), Math.max(1, dur | 0), 1)
     doc.palette = defaultPalette()
     const history = new History(doc)
-    set({ doc, history, frame: 0, layer: 0, showNew: false, playing: false, fileName: 'sprite.aseprite' })
+    set({ doc, history, frame: 0, layer: 0, selection: null, showNew: false, playing: false, fileName: 'sprite.aseprite' })
   }
   return h('div', { className: 'ase-modal' },
     h('div', { className: 'ase-modal-box' },
@@ -1315,8 +1472,26 @@ function NewDialog({ t, onClose }) {
 }
 
 // ── main panel ──────────────────────────────────────────────────────────────
-function EditorPanel({ t }) {
+function EditorPanel({ t, askSelection }) {
   const s = useAse()
+  const [askOpen, setAskOpen] = React.useState(false)
+  const openAsk = () => {
+    if (s.selection && typeof askSelection === 'function') setAskOpen(true)
+  }
+  const submitAsk = async (request) => {
+    const selection = snapshot.selection
+    if (!selection) throw new Error(t('error.noSelection'))
+    if (typeof askSelection !== 'function') throw new Error(t('error.noConversation'))
+    const imageUrl = regionToPng(snapshot.doc, snapshot.frame, selection.x, selection.y, selection.w, selection.h, 8)
+    const file = dataUrlToFile(imageUrl, 'aseprite-selection-frame-' + snapshot.frame + '.png')
+    const prompt = [
+      '这是像素画精灵当前帧的局部选区截图。',
+      '原图尺寸：' + snapshot.doc.width + '×' + snapshot.doc.height + '；选区左上角：(' + selection.x + ',' + selection.y + ')；选区大小：' + selection.w + '×' + selection.h + '。',
+      '请只针对附图中的选区进行局部调整，保持像素画风格，并不要改动选区外内容。',
+      '具体要求：' + request
+    ].join('\n')
+    await askSelection(file, prompt)
+  }
   const rootRef = React.useRef(null)
   const bodyRef = React.useRef(null)
   const resize = React.useRef(null)
@@ -1395,7 +1570,9 @@ function EditorPanel({ t }) {
       onRedo: () => { const d = s.history.redo(); if (d) set({ doc: d }) },
       onOpen: () => {},
       onSave: saveFile,
-      onNew: () => set({ showNew: true })
+      onNew: () => set({ showNew: true }),
+      onAsk: openAsk,
+      canAsk: Boolean(s.selection && typeof askSelection === 'function')
     }),
     s.error !== null
       ? h('div', { className: 'ase-error' },
@@ -1438,7 +1615,10 @@ function EditorPanel({ t }) {
       title: t('action.resizePanel'),
       onPointerDown: (e) => beginResize('height', e)
     }),
-    s.showNew ? h(NewDialog, { t, onClose: () => set({ showNew: false }) }) : null
+    s.showNew ? h(NewDialog, { t, onClose: () => set({ showNew: false }) }) : null,
+    askOpen && s.selection
+      ? h(AskDialog, { t, selection: s.selection, onClose: () => setAskOpen(false), onSubmit: submitAsk })
+      : null
   )
 }
 
@@ -1463,7 +1643,24 @@ function apply(ctx) {
       id: 'aseprite-panel',
       order: 30,
       locale: NS,
-      inject: () => ({})
+      inject: (sessionId) => {
+        const actx = ctx.sessions.scope(sessionId)
+        if (actx === undefined) throw new Error('dsh-aseprite: session scope unavailable')
+        const conversation = actx.get('conversation')
+        if (conversation === undefined) throw new Error('dsh-aseprite: conversation service unavailable')
+        return {
+          askSelection: (file, prompt) => {
+            const input = conversation.input.for(actx)
+            const attachments = conversation.createDraftImages([file])
+            if (!input.addImages(attachments.map((attachment) => attachment.id))) {
+              conversation.releaseDraftImages(attachments)
+              throw new Error('当前会话暂时不能添加图片附件')
+            }
+            input.setDraft(prompt)
+            input.submit()
+          }
+        }
+      }
     }, EditorPanel)
   )
 }
@@ -1479,11 +1676,14 @@ const zh = {
   'tool.picker': '取色器',
   'tool.line': '直线',
   'tool.rect': '矩形',
+  'tool.select': '框选局部区域',
   'action.undo': '撤销',
   'action.redo': '重做',
   'action.zoomIn': '放大',
   'action.zoomOut': '缩小',
   'action.brushSize': '笔刷/橡皮大小',
+  'action.askSelection': '把选区交给 AI 局部调整',
+  'action.askSend': '发送给 AI',
   'action.open': '打开 .aseprite',
   'action.save': '保存为 .aseprite',
   'action.new': '新建精灵',
@@ -1506,6 +1706,12 @@ const zh = {
   'action.resizePanel': '拖拽调整面板大小',
   'action.create': '创建',
   'dialog.new': '新建精灵',
+  'dialog.ask': 'ASK：局部调整',
+  'dialog.askHint': '会把当前选区截图作为图片附件发送到当前会话的 AI。编辑器像素不会自动修改。',
+  'dialog.selection': '选区',
+  'dialog.askPlaceholder': '例如：把这个角色的眼睛改成闭眼，保持 8-bit 像素风格。',
+  'error.noSelection': '请先框选一个区域。',
+  'error.noConversation': '当前会话不可用，无法发送给 AI。',
   'dialog.width': '宽度',
   'dialog.height': '高度',
   'dialog.frames': '帧数',
@@ -1521,11 +1727,14 @@ const en = {
   'tool.picker': 'Picker',
   'tool.line': 'Line',
   'tool.rect': 'Rect',
+  'tool.select': 'Select region',
   'action.undo': 'Undo',
   'action.redo': 'Redo',
   'action.zoomIn': 'Zoom in',
   'action.zoomOut': 'Zoom out',
   'action.brushSize': 'Brush / eraser size',
+  'action.askSelection': 'Ask AI to adjust selection',
+  'action.askSend': 'Send to AI',
   'action.open': 'Open .aseprite',
   'action.save': 'Save .aseprite',
   'action.new': 'New sprite',
@@ -1548,6 +1757,12 @@ const en = {
   'action.resizePanel': 'Drag to resize panel',
   'action.create': 'Create',
   'dialog.new': 'New sprite',
+  'dialog.ask': 'ASK: Local adjustment',
+  'dialog.askHint': 'The selected crop will be sent as an image attachment to the current AI conversation. The editor pixels are not changed automatically.',
+  'dialog.selection': 'Selection',
+  'dialog.askPlaceholder': "For example: close this character's eyes while keeping the 8-bit pixel-art style.",
+  'error.noSelection': 'Select a region first.',
+  'error.noConversation': 'The current conversation is unavailable.',
   'dialog.width': 'Width',
   'dialog.height': 'Height',
   'dialog.frames': 'Frames',
@@ -1579,6 +1794,7 @@ function ensureStyles() {
 [data-ase-root] * , [data-ase-root] *::before, [data-ase-root] *::after { box-sizing: border-box; }
 
 .ase-root {
+  position: relative;
   border: 1px solid var(--ase-border);
   border-radius: 8px;
   background: var(--ase-bg);
@@ -1621,6 +1837,8 @@ function ensureStyles() {
   color: var(--ase-text); background: transparent; border: 1px solid var(--ase-border); border-radius: 4px;
 }
 .ase-brush-unit { color: var(--ase-text-dim); font-size: 11px; }
+.ase-ask { font-weight: 700; letter-spacing: .04em; }
+.ase-selection-label { color: var(--ase-accent); font-size: 11px; white-space: nowrap; }
 .ase-file-btn { display: inline-flex; align-items: center; }
 
 .ase-header-btn {
@@ -1795,6 +2013,17 @@ function ensureStyles() {
   min-width: 260px;
 }
 .ase-modal-title { font-weight: 600; }
+.ase-ask-box { width: min(440px, calc(100% - 32px)); }
+.ase-ask-hint { color: var(--ase-text-dim); font-size: 12px; }
+.ase-ask-selection { color: var(--ase-accent); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.ase-ask-textarea {
+  width: 100%; min-height: 92px; resize: vertical;
+  background: transparent; color: var(--ase-text);
+  border: 1px solid var(--ase-border); border-radius: 6px; padding: 8px;
+  font: inherit;
+}
+.ase-ask-textarea:focus { outline: 1px solid var(--ase-accent); }
+.ase-ask-error { color: var(--ase-danger); font-size: 12px; }
 .ase-modal-box label { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
 .ase-modal-box input {
   width: 110px;
